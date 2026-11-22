@@ -1,0 +1,8 @@
+[general]
+ignore=body-is-missing
+
+[title-match-regex]
+regex=^(feat|fix|docs|test|chore|refactor|perf|style|revert)(\([^a-z0-9-]+\))?:\s.+$
+
+[body-min-length]
+min-length=0

@@ -192,8 +192,9 @@ function readProcArgv(pid) {
 
 function capturePane(paneId, agentOverride) {
   const pane = readPane(paneId);
-  const agent = normalizeAgent(agentOverride || pane.agent);
+  const agent = normalizeAgent(agentOverride || pane.agent || pane.agent_session?.agent);
   if (!agent || !pane.agent_session) return false;
+  if (pane.agent_session.agent !== agent) return false;
 
   const session = pane.agent_session.value;
   if (!validSession(session)) return false;
@@ -236,12 +237,27 @@ function restorePanes({ dryRun = false } = {}) {
 
   for (const pane of panes) {
     const record = readRecord(pane.pane_id);
-    if (!shouldRestore(record, pane)) continue;
-    if (!sessionExists(record.agent, record.session)) continue;
+    if (!record) continue;
     const action = { pane_id: pane.pane_id, agent: record.agent, session: record.session };
+    if (!shouldRestore(record, pane)) {
+      action.skipped = 'stale_record';
+      action.pane_agent = pane.agent_session?.agent || null;
+      action.pane_session = pane.agent_session?.value || null;
+      actions.push(action);
+      continue;
+    }
+    if (!sessionExists(record.agent, record.session)) {
+      action.skipped = 'missing_session';
+      actions.push(action);
+      continue;
+    }
     try {
       const info = processInfo(pane.pane_id);
-      if (firstAgentProcess(info, record.agent)) continue;
+      if (firstAgentProcess(info, record.agent)) {
+        action.skipped = 'agent_running';
+        actions.push(action);
+        continue;
+      }
       const command = shellCommand(launchArgv(record.agent, record.argv, record.session));
       action.command = command;
       if (dryRun) {

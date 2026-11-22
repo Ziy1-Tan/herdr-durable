@@ -7,6 +7,7 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 
 const {
+  sessionExists,
   restorePanes,
   readRecord,
   launchArgv,
@@ -58,6 +59,30 @@ test('validates sessions', () => {
   assert.equal(validSession('bad\0id'), false);
 });
 
+test('validates persisted agent sessions', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
+  const codexDirectory = path.join(directory, 'codex');
+  const claudeDirectory = path.join(directory, 'claude');
+  const piDirectory = path.join(directory, 'pi-sessions');
+  fs.mkdirSync(codexDirectory, { recursive: true });
+  fs.mkdirSync(claudeDirectory, { recursive: true });
+  fs.mkdirSync(piDirectory, { recursive: true });
+  fs.writeFileSync(path.join(codexDirectory, 'rollout-id.jsonl'), '');
+  fs.writeFileSync(path.join(claudeDirectory, 'id.jsonl'), '');
+  fs.writeFileSync(path.join(piDirectory, 'psess.jsonl'), '');
+  process.env.HERDR_DURABLE_CODEX_SESSIONS = codexDirectory;
+  process.env.HERDR_DURABLE_CLAUDE_SESSIONS = claudeDirectory;
+  process.env.HERDR_DURABLE_PI_SESSIONS = piDirectory;
+  assert.equal(sessionExists('codex', 'id'), true);
+  assert.equal(sessionExists('claude', 'id'), true);
+  assert.equal(sessionExists('claude', 'missing'), false);
+  assert.equal(sessionExists('pi', 'psess'), true);
+  fs.rmSync(directory, { recursive: true, force: true });
+  delete process.env.HERDR_DURABLE_CODEX_SESSIONS;
+  delete process.env.HERDR_DURABLE_CLAUDE_SESSIONS;
+  delete process.env.HERDR_DURABLE_PI_SESSIONS;
+});
+
 test('reads argv from proc', () => {
   assert.equal(readProcArgv(999999999), null);
   assert.equal(readProcArgv(process.pid)[0], process.execPath);
@@ -66,15 +91,18 @@ test('reads argv from proc', () => {
 test('restores multiple panes and sends each command once', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
   const executable = path.join(directory, 'herdr');
+  const codexDirectory = path.join(directory, 'codex');
+  const claudeDirectory = path.join(directory, 'claude');
+  const piDirectory = path.join(directory, 'pi');
   const panes = [
     { pane_id: 'w1:p1', agent: 'codex', agent_session: { agent: 'codex', value: 'sess' } },
     { pane_id: 'w1:p2', agent: 'claude', agent_session: { agent: 'claude', value: 'csess' } },
-    { pane_id: 'w1:p3', agent: 'pi', agent_session: { agent: 'pi', value: '/sessions/psess' } },
+    { pane_id: 'w1:p3', agent: 'pi', agent_session: { agent: 'pi', value: 'psess' } },
   ];
   const records = [
     ['w1:p1', { agent: 'codex', session: 'sess', argv: ['/codex', '--yolo'] }],
     ['w1:p2', { agent: 'claude', session: 'csess', argv: ['/claude', '--model', 'x'] }],
-    ['w1:p3', { agent: 'pi', session: '/sessions/psess', argv: ['/pi', '--profile', 'x'] }],
+    ['w1:p3', { agent: 'pi', session: 'psess', argv: ['/pi', '--profile', 'x'] }],
   ];
   fs.writeFileSync(executable, `#!/bin/sh
 case "$1 $2" in
@@ -85,6 +113,15 @@ case "$1 $2" in
 esac
 `);
   fs.chmodSync(executable, 0o755);
+  fs.mkdirSync(codexDirectory, { recursive: true });
+  fs.mkdirSync(claudeDirectory, { recursive: true });
+  fs.mkdirSync(piDirectory, { recursive: true });
+  fs.writeFileSync(path.join(codexDirectory, 'rollout-sess.jsonl'), '');
+  fs.writeFileSync(path.join(claudeDirectory, 'csess.jsonl'), '');
+  fs.writeFileSync(path.join(piDirectory, 'psess.jsonl'), '');
+  process.env.HERDR_DURABLE_CODEX_SESSIONS = codexDirectory;
+  process.env.HERDR_DURABLE_CLAUDE_SESSIONS = claudeDirectory;
+  process.env.HERDR_DURABLE_PI_SESSIONS = piDirectory;
   fs.mkdirSync(path.join(directory, 'panes'), { recursive: true });
   for (const [paneId, record] of records) {
     fs.writeFileSync(path.join(directory, 'panes', `${encodeURIComponent(paneId)}.json`), JSON.stringify(record));
@@ -100,11 +137,14 @@ esac
   assert.deepEqual(commands, [
     'pane run w1:p1 codex --yolo resume sess',
     'pane run w1:p2 claude --model x --resume csess',
-    'pane run w1:p3 pi --profile x --session /sessions/psess',
+    'pane run w1:p3 pi --profile x --session psess',
   ]);
   fs.rmSync(directory, { recursive: true, force: true });
   delete process.env.HERDR_BIN_PATH;
   delete process.env.HERDR_PLUGIN_STATE_DIR;
+  delete process.env.HERDR_DURABLE_CODEX_SESSIONS;
+  delete process.env.HERDR_DURABLE_CLAUDE_SESSIONS;
+  delete process.env.HERDR_DURABLE_PI_SESSIONS;
 });
 
 test('treats missing or invalid pane state as empty', () => {

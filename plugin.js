@@ -2,6 +2,7 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
@@ -14,6 +15,16 @@ const RESUME_ARGUMENTS = {
   pi: '--session',
 };
 const SUPPORTED_AGENTS = new Set(Object.keys(RESUME_ARGUMENTS));
+const SESSION_DIRECTORIES = {
+  claude: path.join(os.homedir(), '.claude', 'projects'),
+  codex: path.join(os.homedir(), '.codex', 'sessions'),
+  pi: path.join(os.homedir(), '.pi', 'agent', 'sessions'),
+};
+const SESSION_DIRECTORY_ENV = {
+  claude: 'HERDR_DURABLE_CLAUDE_SESSIONS',
+  codex: 'HERDR_DURABLE_CODEX_SESSIONS',
+  pi: 'HERDR_DURABLE_PI_SESSIONS',
+};
 
 function herdr() {
   return process.env.HERDR_BIN_PATH || 'herdr';
@@ -114,6 +125,25 @@ function validSession(value) {
   return typeof value === 'string' && value.length <= 1024 && !value.includes('\0');
 }
 
+function sessionExists(agent, session) {
+  if (!validSession(session)) return false;
+  const directory = process.env[SESSION_DIRECTORY_ENV[agent]] || SESSION_DIRECTORIES[agent];
+  if (!directory) return false;
+  if (agent === 'pi') {
+    const file = path.resolve(directory, session);
+    return file.startsWith(`${directory}${path.sep}`) && fs.existsSync(`${file}.jsonl`);
+  }
+  try {
+    return fs.readdirSync(directory, { recursive: true }).some(file => (
+      agent === 'codex'
+        ? path.basename(file).endsWith(`-${session}.jsonl`)
+        : path.basename(file) === `${session}.jsonl`
+    ));
+  } catch {
+    return false;
+  }
+}
+
 function launchArgv(agent, argv, session) {
   const resumeCommand = RESUME_ARGUMENTS[agent];
   const flags = argv.slice(1).filter((argument, index, values) => {
@@ -161,6 +191,7 @@ function capturePane(paneId, agentOverride) {
 
   const session = pane.agent_session.value;
   if (!validSession(session)) return false;
+  if (!sessionExists(agent, session)) return false;
 
   const info = processInfo(paneId);
   const process = firstAgentProcess(info, agent);
@@ -200,6 +231,7 @@ function restorePanes({ dryRun = false } = {}) {
   for (const pane of panes) {
     const record = readRecord(pane.pane_id);
     if (!shouldRestore(record, pane)) continue;
+    if (!sessionExists(record.agent, record.session)) continue;
     const action = { pane_id: pane.pane_id, agent: record.agent, session: record.session };
     try {
       const info = processInfo(pane.pane_id);
@@ -267,5 +299,6 @@ module.exports = {
   readProcArgv,
   shellQuote,
   shouldRestore,
+  sessionExists,
   validSession,
 };

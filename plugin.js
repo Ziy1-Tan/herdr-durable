@@ -50,31 +50,39 @@ function runPaneCommand(paneId, command) {
   return true;
 }
 
-function stateFile() {
+function stateRoot() {
   const root = process.env.HERDR_PLUGIN_STATE_DIR;
   if (!root) throw new Error('HERDR_PLUGIN_STATE_DIR is not set; run through Herdr');
-  return path.join(root, 'state.json');
+  return path.join(root, 'panes');
 }
 
-function readState() {
+function stateFile(paneId) {
+  return path.join(stateRoot(), `${encodeURIComponent(paneId)}.json`);
+}
+
+function readRecord(paneId) {
   try {
-    const raw = fs.readFileSync(stateFile(), 'utf8');
+    const raw = fs.readFileSync(stateFile(paneId), 'utf8');
     const value = raw.trim() ? JSON.parse(raw) : null;
     if (value && typeof value === 'object' && !Array.isArray(value)) return value;
   } catch (error) {
     if (error.code !== 'ENOENT') {
-      console.error(`herdr-durable: ignoring unreadable state: ${error.message}`);
+      console.error(`herdr-durable: ignoring state for ${paneId}: ${error.message}`);
     }
   }
-  return { version: 1, panes: {} };
+  return null;
 }
 
-function writeState(state) {
-  const file = stateFile();
+function writeRecord(paneId, record) {
+  const file = stateFile(paneId);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 });
+  fs.writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
   fs.renameSync(temp, file);
+}
+
+function deleteRecord(paneId) {
+  fs.rmSync(stateFile(paneId), { force: true });
 }
 
 function parseEvent(raw) {
@@ -161,16 +169,11 @@ function capturePane(paneId, agentOverride) {
     : null;
   if (!argv || argv.length === 0) return false;
 
-  const state = readState();
-  state.panes[paneId] = {
+  writeRecord(paneId, {
     agent,
     session,
-    session_kind: pane.agent_session.kind,
-    cwd: pane.cwd,
     argv,
-    saved_at: new Date().toISOString(),
-  };
-  writeState(state);
+  });
   return true;
 }
 
@@ -189,14 +192,13 @@ function shouldRestore(record, pane) {
 }
 
 function restorePanes({ dryRun = false } = {}) {
-  const state = readState();
   const response = herdrJson(['pane', 'list']);
   const panes = response?.result?.panes || [];
   const actions = [];
   let restored = 0;
 
   for (const pane of panes) {
-    const record = state.panes[pane.pane_id];
+    const record = readRecord(pane.pane_id);
     if (!shouldRestore(record, pane)) continue;
     const action = { pane_id: pane.pane_id, agent: record.agent, session: record.session };
     try {
@@ -209,8 +211,7 @@ function restorePanes({ dryRun = false } = {}) {
         continue;
       }
       runPaneCommand(pane.pane_id, command);
-      delete state.panes[pane.pane_id];
-      writeState(state);
+      deleteRecord(pane.pane_id);
       restored += 1;
       actions.push(action);
     } catch (error) {
@@ -238,8 +239,8 @@ function main() {
     return;
   }
   if (mode === 'status') {
-    const state = readState();
-    console.log(JSON.stringify({ panes: Object.keys(state.panes).length }));
+    fs.mkdirSync(stateRoot(), { recursive: true });
+    console.log(JSON.stringify({ panes: fs.readdirSync(stateRoot()).filter(file => file.endsWith('.json')).length }));
     return;
   }
   throw new Error(`unknown mode: ${mode}`);
@@ -260,7 +261,7 @@ module.exports = {
   launchArgv,
   normalizeAgent,
   parseEvent,
-  readState,
+  readRecord,
   restorePanes,
   shellCommand,
   readProcArgv,

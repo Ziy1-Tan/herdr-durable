@@ -31,7 +31,7 @@ delete env.HERDR_WORKSPACE_ID;
 delete env.HERDR_TAB_ID;
 delete env.HERDR_PANE_ID;
 
-const statePath = join(home, ".local", "state", "herdr", "plugins", "herdr-durable", "state.json");
+const stateRoot = join(home, ".local", "state", "herdr", "plugins", "herdr-durable", "panes");
 const terminal = TuiTest.ephemeral(herdrSession);
 const agentName = `durable-${agent}-${Date.now()}`;
 function runHerdr(args) {
@@ -56,7 +56,7 @@ function paneProcess(paneId) {
 
 function savedRecord(paneId) {
   try {
-    return JSON.parse(readFileSync(statePath, "utf8")).panes?.[paneId] || null;
+    return JSON.parse(readFileSync(join(stateRoot, `${encodeURIComponent(paneId)}.json`), "utf8"));
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
     return null;

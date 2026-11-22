@@ -4,7 +4,8 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 bin="$root/fake-herdr"
 state=$(mktemp -d)
-mkdir -p "$state/state"
+state="$state/state"
+mkdir -p "$state/panes"
 
 cat >"$bin" <<'EOF'
 #!/bin/sh
@@ -22,14 +23,16 @@ case "$*" in
 esac
 EOF
 chmod +x "$bin"
-printf '%s\n' '{"version":1,"panes":{"w1:p1":{"agent":"codex","session":"sess","session_kind":"id","cwd":"/repo","argv":["/codex","--yolo"],"saved_at":"now"},"w1:p2":{"agent":"claude","session":"csess","session_kind":"id","cwd":"/repo","argv":["/claude","--model","x"],"saved_at":"now"},"w1:p3":{"agent":"pi","session":"/sessions/psess","session_kind":"path","cwd":"/repo","argv":["/pi","--profile","x"],"saved_at":"now"}}}' >"$state/state/state.json"
+printf '%s\n' '{"agent":"codex","session":"sess","argv":["/codex","--yolo"]}' >"$state/panes/w1%3Ap1.json"
+printf '%s\n' '{"agent":"claude","session":"csess","argv":["/claude","--model","x"]}' >"$state/panes/w1%3Ap2.json"
+printf '%s\n' '{"agent":"pi","session":"/sessions/psess","argv":["/pi","--profile","x"]}' >"$state/panes/w1%3Ap3.json"
 
 HERDR_DURABLE_COMMAND_LOG="$state/runs" \
   HERDR_BIN_PATH="$bin" \
-  HERDR_PLUGIN_STATE_DIR="$state/state" \
+  HERDR_PLUGIN_STATE_DIR="$state" \
   node "$root/plugin.js" restore
-HERDR_BIN_PATH="$bin" HERDR_PLUGIN_STATE_DIR="$state/state" node "$root/plugin.js" restore
-node -e 'const state = JSON.parse(require("fs").readFileSync(process.argv[1])); if (Object.keys(state.panes).length !== 0) process.exit(1)' "$state/state/state.json"
+HERDR_BIN_PATH="$bin" HERDR_PLUGIN_STATE_DIR="$state" node "$root/plugin.js" restore
+node -e 'const fs=require("fs"); const dir=process.argv[1]; if (fs.readdirSync(dir).length!==0) process.exit(1)' "$state/panes"
 node -e 'const fs=require("fs"); const runs=fs.readFileSync(process.argv[1],"utf8").trim().split(String.fromCharCode(10)); if (runs.length!==3) process.exit(1)' "$state/runs"
 
 rm -rf "$state"

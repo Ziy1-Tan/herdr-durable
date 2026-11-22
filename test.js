@@ -7,7 +7,7 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 
 const {
-  readState,
+  readRecord,
   launchArgv,
   normalizeAgent,
   parseEvent,
@@ -62,13 +62,15 @@ test('reads argv from proc', () => {
   assert.equal(readProcArgv(process.pid)[0], process.execPath);
 });
 
-test('treats missing or invalid state as empty', () => {
+test('treats missing or invalid pane state as empty', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
   process.env.HERDR_PLUGIN_STATE_DIR = directory;
-  fs.writeFileSync(path.join(directory, 'state.json'), '');
-  assert.deepEqual(readState(), { version: 1, panes: {} });
-  fs.writeFileSync(path.join(directory, 'state.json'), '{');
-  assert.deepEqual(readState(), { version: 1, panes: {} });
+  const file = path.join(directory, 'panes', 'w1%3Ap1.json');
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, '');
+  assert.equal(readRecord('w1:p1'), null);
+  fs.writeFileSync(file, '{');
+  assert.equal(readRecord('w1:p1'), null);
   fs.rmSync(directory, { recursive: true, force: true });
   delete process.env.HERDR_PLUGIN_STATE_DIR;
 });

@@ -1,0 +1,27 @@
+id = "herdr-durable"
+name = "Herdr Durable"
+version = "0.1.0"
+min_herdr_version = "0.9.5"
+description = "Resume Claude, Codex, and Pi with their original launch arguments"
+platforms = ["linux", "macos"]
+
+[[build]]
+command = ["node", "configure.js", "disable"]
+
+[[startup]]
+command = ["node", "plugin.js"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["node", "plugin.js", "capture"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["node", "plugin.js", "capture"]
+
+[[actions]]
+id = "enable-native-resume"
+title = "Herdr Durable: enable native resume"
+description = "Restore Herdr's built-in agent resume before uninstalling"
+contexts = ["global"]
+command = ["node", "configure.js", "enable"]

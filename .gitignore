@@ -1,0 +1,12 @@
+node_modules/
+count
+
+*.log
+*.tmp
+
+state.json
+*.state.json
+*.state.json.tmp
+
+.DS_Store
+Thumbs.db

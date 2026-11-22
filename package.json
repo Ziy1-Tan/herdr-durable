@@ -1,0 +1,27 @@
+{
+  "name": "herdr-durable",
+  "version": "0.1.0",
+  "description": "Keep Claude, Codex, and Pi launch arguments across Herdr restarts",
+  "license": "MIT",
+  "files": [
+    "LICENSE",
+    "README.md",
+    "herdr-plugin.toml",
+    "configure.js",
+    "plugin.js"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test.js && ./test-restore.sh",
+    "test:core": "node --test test.js",
+    "test:restore": "./test-restore.sh",
+    "test:e2e": "node e2e-test.mjs",
+    "test:e2e:all": "node e2e-test.mjs codex && node e2e-test.mjs claude && node e2e-test.mjs pi",
+    "prepublishOnly": "npm test"
+  },
+  "devDependencies": {
+    "@microsoft/tui-test": "^0.1.1"
+  }
+}

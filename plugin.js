@@ -14,6 +14,7 @@ const RESUME_ARGUMENTS = {
   claude: '--resume',
   pi: '--session',
 };
+const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'node', 'bun', 'deno', 'python', 'python3', 'env']);
 const SUPPORTED_AGENTS = new Set(Object.keys(RESUME_ARGUMENTS));
 const SESSION_DIRECTORIES = {
   claude: path.join(os.homedir(), '.claude', 'projects'),
@@ -130,8 +131,9 @@ function sessionExists(agent, session) {
   const directory = process.env[SESSION_DIRECTORY_ENV[agent]] || SESSION_DIRECTORIES[agent];
   if (!directory) return false;
   if (agent === 'pi') {
-    const file = path.resolve(directory, session);
-    return file.startsWith(`${directory}${path.sep}`) && fs.existsSync(`${file}.jsonl`);
+    const root = path.resolve(directory);
+    const file = path.resolve(root, session.endsWith('.jsonl') ? session : `${session}.jsonl`);
+    return file.startsWith(`${root}${path.sep}`) && fs.existsSync(file);
   }
   try {
     return fs.readdirSync(directory, { recursive: true }).some(file => (
@@ -146,7 +148,11 @@ function sessionExists(agent, session) {
 
 function launchArgv(agent, argv, session) {
   const resumeCommand = RESUME_ARGUMENTS[agent];
-  const flags = argv.slice(1).filter((argument, index, values) => {
+  let offset = 1;
+  while (offset < argv.length && INTERPRETERS.has(path.basename(argv[offset - 1]))) {
+    offset += 1;
+  }
+  const flags = argv.slice(offset).filter((argument, index, values) => {
     if (argument === resumeCommand) return false;
     return values[index - 1] !== resumeCommand;
   });

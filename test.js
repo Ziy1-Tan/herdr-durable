@@ -41,6 +41,8 @@ test('builds agent-specific resume commands', () => {
   assert.deepEqual(launchArgv('pi', ['/pi', '--profile', 'x'], 'path'), ['pi', '--profile', 'x', '--session', 'path']);
   assert.deepEqual(launchArgv('pi', ['/pi', '--profile', 'x', '--session', 'old'], 'path'), ['pi', '--profile', 'x', '--session', 'path']);
   assert.deepEqual(launchArgv('pi', ['pi'], 'path'), ['pi', '--session', 'path']);
+  assert.deepEqual(launchArgv('codex', ['/bin/sh', '/tmp/bin/codex', '--yolo'], 'id'), ['codex', '--yolo', 'resume', 'id']);
+  assert.deepEqual(launchArgv('claude', ['node', '/tmp/bin/claude', '--model', 'x'], 'id'), ['claude', '--model', 'x', '--resume', 'id']);
 });
 
 test('shell quotes safely', () => {
@@ -77,6 +79,8 @@ test('validates persisted agent sessions', () => {
   assert.equal(sessionExists('claude', 'id'), true);
   assert.equal(sessionExists('claude', 'missing'), false);
   assert.equal(sessionExists('pi', 'psess'), true);
+  assert.equal(sessionExists('pi', path.join(piDirectory, 'psess.jsonl')), true);
+  assert.equal(sessionExists('pi', path.join(piDirectory, 'missing.jsonl')), false);
   fs.rmSync(directory, { recursive: true, force: true });
   delete process.env.HERDR_DURABLE_CODEX_SESSIONS;
   delete process.env.HERDR_DURABLE_CLAUDE_SESSIONS;

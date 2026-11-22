@@ -6,9 +6,13 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const API_TIMEOUT_MS = 10_000;
-const API_COMMAND_TIMEOUT_MS = 1_000;
+const API_TIMEOUT_MS = 20_000;
+const API_COMMAND_TIMEOUT_MS = 10_000;
 const API_SLEEP_INTERVAL_MS = 100;
+const CAPTURE_RETRY_MS = 30_000;
+const CAPTURE_ALL_RETRY_MS = 5_000;
+const CAPTURE_POLL_INTERVAL_MS = 500;
+const RETRYABLE_CAPTURE_REASONS = new Set(['no_agent_session', 'missing_session', 'error']);
 const RESUME_ARGUMENTS = {
   codex: 'resume',
   claude: '--resume',
@@ -129,7 +133,7 @@ function sessionExists(agent, session) {
   if (agent === 'pi') {
     const root = path.resolve(directory);
     const file = path.resolve(root, session.endsWith('.jsonl') ? session : `${session}.jsonl`);
-    return file.startsWith(`${root}${path.sep}`) && fs.existsSync(file);
+    return file.startsWith(`${root}${path.sep}`);
   }
   try {
     return fs.readdirSync(directory, { recursive: true }).some(file => (
@@ -189,38 +193,91 @@ function readProcArgv(pid) {
 function capturePane(paneId, agentOverride) {
   const pane = readPane(paneId);
   const agent = normalizeAgent(agentOverride || pane.agent || pane.agent_session?.agent);
-  if (!agent || !pane.agent_session) return false;
-  if (pane.agent_session.agent !== agent) return false;
+  if (!agent) return { captured: false, reason: 'unsupported_agent' };
+  if (!pane.agent_session) return { captured: false, reason: 'no_agent_session' };
+  if (pane.agent_session.agent !== agent) return { captured: false, reason: 'agent_mismatch' };
 
   const session = pane.agent_session.value;
-  if (!validSession(session)) return false;
-  if (!sessionExists(agent, session)) return false;
+  if (!validSession(session)) return { captured: false, reason: 'invalid_session' };
+  if (!sessionExists(agent, session)) return { captured: false, reason: 'missing_session' };
 
   const info = processInfo(paneId);
   const process = firstAgentProcess(info, agent);
   const argv = process
     ? (readProcArgv(process.pid) || (Array.isArray(process.argv) ? process.argv : null))
     : null;
-  if (!argv || argv.length === 0) return false;
+  if (!argv || argv.length === 0) return { captured: false, reason: 'no_process' };
 
   writeRecord(paneId, {
     agent,
     session,
     argv,
   });
-  return true;
+  return { captured: true };
+}
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function captureWithRetry(paneId, agentOverride, waitMs = CAPTURE_RETRY_MS) {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    let outcome;
+    try {
+      outcome = capturePane(paneId, agentOverride);
+    } catch (error) {
+      outcome = { captured: false, reason: 'error', error: error.message };
+    }
+    if (outcome.captured || !RETRYABLE_CAPTURE_REASONS.has(outcome.reason)) return outcome;
+    if (Date.now() >= deadline) return outcome;
+    sleep(CAPTURE_POLL_INTERVAL_MS);
+  }
 }
 
 function captureFromEvent(rawEvent) {
   const event = parseEvent(rawEvent);
   if (!event) return { captured: false, reason: 'ignored_event' };
-  const captured = capturePane(event.paneId, event.agent);
-  return { captured, pane_id: event.paneId, agent: event.agent || null };
+  const outcome = captureWithRetry(event.paneId, event.agent);
+  const result = { captured: outcome.captured };
+  if (outcome.reason) result.reason = outcome.reason;
+  if (outcome.error) result.error = outcome.error;
+  result.pane_id = event.paneId;
+  result.agent = event.agent || null;
+  return result;
+}
+
+function pruneRecords(paneIds) {
+  const root = stateRoot();
+  let files;
+  try {
+    files = fs.readdirSync(root);
+  } catch (error) {
+    if (error.code !== 'ENOENT') {
+      console.error(`herdr-durable: cannot prune records: ${error.message}`);
+    }
+    return 0;
+  }
+  let pruned = 0;
+  for (const file of files) {
+    if (!file.endsWith('.json')) continue;
+    let paneId;
+    try {
+      paneId = decodeURIComponent(file.slice(0, -5));
+    } catch {
+      continue;
+    }
+    if (paneIds.has(paneId) || !readRecord(paneId)) continue;
+    fs.rmSync(stateFile(paneId), { force: true });
+    pruned += 1;
+  }
+  return pruned;
 }
 
 function captureAll() {
   const response = herdrJson(['pane', 'list']);
   const panes = response?.result?.panes || [];
+  const paneIds = new Set(panes.map(pane => pane.pane_id));
   const actions = [];
   let captured = 0;
 
@@ -231,22 +288,19 @@ function captureAll() {
       actions.push(action);
       continue;
     }
-    try {
-      if (capturePane(pane.pane_id)) {
-        captured += 1;
-        action.captured = true;
-      } else {
-        action.captured = false;
-        action.skipped = 'unreadable_process';
-      }
-    } catch (error) {
-      action.captured = false;
-      action.error = error.message;
+    const outcome = captureWithRetry(pane.pane_id, null, CAPTURE_ALL_RETRY_MS);
+    if (outcome.captured) {
+      captured += 1;
+      action.captured = true;
+    } else {
+      action.skipped = outcome.reason || 'not_captured';
+      if (outcome.error) action.error = outcome.error;
     }
     actions.push(action);
   }
 
-  return { captured, actions };
+  const pruned = pruneRecords(paneIds);
+  return { captured, actions, pruned };
 }
 
 function shouldRestore(record, pane) {
@@ -377,7 +431,11 @@ function main() {
   if (mode === 'capture-all') {
     const result = captureAll();
     console.log(JSON.stringify(result));
-    notify('Herdr Durable', `Saved ${result.captured} session${result.captured === 1 ? '' : 's'}.`);
+    const summary = [`Saved ${result.captured} session${result.captured === 1 ? '' : 's'}`];
+    if (result.pruned) {
+      summary.push(`pruned ${result.pruned} closed pane${result.pruned === 1 ? '' : 's'}`);
+    }
+    notify('Herdr Durable', `${summary.join(', ')}.`);
     return;
   }
   if (mode === 'restore') {
@@ -414,6 +472,7 @@ module.exports = {
   SUPPORTED_AGENTS,
   captureAll,
   captureFromEvent,
+  captureWithRetry,
   launchArgv,
   normalizeAgent,
   parseEvent,

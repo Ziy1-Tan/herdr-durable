@@ -34,7 +34,7 @@ herdr plugin uninstall herdr-durable
 
 ## How it works
 
-1. On `pane_agent_detected` and `pane_agent_status_changed`, the plugin records the pane, agent, session, cwd, and foreground argv.
+1. On `pane_agent_detected` and `pane_agent_status_changed`, the plugin records the pane, agent, session, and foreground argv. Agents report their session some time after the process appears and write their session files even later, so capture retries for up to 30 seconds until both are present.
 2. On plugin startup, it reads restored panes, matches saved sessions, and runs the reconstructed resume command in each matching pane.
 3. Saved state is kept. Panes with a live agent process are left unchanged, so a manual restore can retry a failed resume.
 
@@ -56,9 +56,9 @@ Herdr shows a notification with the result. The full JSON is in `herdr plugin lo
 - `status` shows every saved pane, whether the pane still exists, and whether its session file is present.
 - `restore-dry-run` shows the exact commands without running them.
 - `restore` retries only idle panes with saved sessions. Running agents are skipped, so it is safe to run again.
-- `save` captures the agents running in Herdr now.
+- `save` captures the agents running in Herdr now and removes saved records whose panes no longer exist.
 
-The plugin never starts an agent when its session file is missing, because that would open a blank conversation. Restore the transcript from a backup, or start a new chat.
+The plugin never starts Claude or Codex when their session file is missing, because a resume would open a blank conversation. Restore the transcript from a backup, or start a new chat. Pi is the exception: it creates its session file only after the first message, so a Pi pane is restored to its session path even while the file is absent, and Pi opens that path fresh.
 
 ## Test
 

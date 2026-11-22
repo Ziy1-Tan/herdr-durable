@@ -60,6 +60,7 @@ esac
     data: { pane_id: 'w1:p1', agent: 'codex' },
   }));
   assert.equal(mismatch.captured, false);
+  assert.equal(mismatch.reason, 'agent_mismatch');
   assert.equal(readRecord('w1:p1'), null);
 
   const match = captureFromEvent(JSON.stringify({
@@ -76,12 +77,180 @@ esac
   assert.deepEqual(captureAll(), {
     captured: 1,
     actions: [{ pane_id: 'w1:p1', captured: true }],
+    pruned: 0,
   });
 
   fs.rmSync(directory, { recursive: true, force: true });
   delete process.env.HERDR_BIN_PATH;
   delete process.env.HERDR_PLUGIN_STATE_DIR;
   delete process.env.HERDR_DURABLE_CLAUDE_SESSIONS;
+});
+
+test('waits for the agent session to be reported before capturing', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
+  const executable = path.join(directory, 'herdr');
+  const codexDirectory = path.join(directory, 'codex');
+  fs.mkdirSync(codexDirectory, { recursive: true });
+  fs.writeFileSync(path.join(codexDirectory, 'rollout-sess.jsonl'), '');
+  fs.writeFileSync(executable, `#!/bin/sh
+case "$1 $2" in
+  'pane get')
+    calls=$(cat ${JSON.stringify(path.join(directory, 'calls'))} 2>/dev/null || echo 0)
+    calls=$((calls + 1)); printf '%s' "$calls" > ${JSON.stringify(path.join(directory, 'calls'))}
+    if [ "$calls" -lt 2 ]; then
+      printf '%s\\n' '{"id":"x","result":{"pane":{"pane_id":"w1:p1","agent":"codex"}}}'
+    else
+      printf '%s\\n' '{"id":"x","result":{"pane":{"pane_id":"w1:p1","agent":"codex","agent_session":{"agent":"codex","kind":"id","value":"sess"}}}}'
+    fi ;;
+  'pane process-info') printf '%s\\n' '{"id":"x","result":{"process_info":{"foreground_processes":[{"pid":999999999,"name":"codex","argv":["codex","--yolo"]}]}}}' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`);
+  fs.chmodSync(executable, 0o755);
+  process.env.HERDR_BIN_PATH = executable;
+  process.env.HERDR_PLUGIN_STATE_DIR = directory;
+  process.env.HERDR_DURABLE_CODEX_SESSIONS = codexDirectory;
+
+  const result = captureFromEvent(JSON.stringify({
+    event: 'pane_agent_detected',
+    data: { pane_id: 'w1:p1', agent: 'codex' },
+  }));
+  assert.equal(result.captured, true);
+  assert.deepEqual(readRecord('w1:p1'), {
+    agent: 'codex',
+    session: 'sess',
+    argv: ['codex', '--yolo'],
+  });
+
+  fs.rmSync(directory, { recursive: true, force: true });
+  delete process.env.HERDR_BIN_PATH;
+  delete process.env.HERDR_PLUGIN_STATE_DIR;
+  delete process.env.HERDR_DURABLE_CODEX_SESSIONS;
+});
+
+test('prunes records whose panes are gone during save', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
+  const executable = path.join(directory, 'herdr');
+  const panes = [{ pane_id: 'w1:p1' }];
+  fs.writeFileSync(executable, `#!/bin/sh
+case "$1 $2" in
+  'pane list') printf '%s\\n' '${JSON.stringify({ id: 'x', result: { panes } })}' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`);
+  fs.chmodSync(executable, 0o755);
+  fs.mkdirSync(path.join(directory, 'panes'), { recursive: true });
+  fs.writeFileSync(
+    path.join(directory, 'panes', 'w9%3Ap9.json'),
+    JSON.stringify({ agent: 'pi', session: 'gone', argv: ['pi'] }),
+  );
+  fs.writeFileSync(
+    path.join(directory, 'panes', 'w9%3Ap9.json.123.tmp'),
+    JSON.stringify({ agent: 'pi', session: 'stray', argv: ['pi'] }),
+  );
+  process.env.HERDR_BIN_PATH = executable;
+  process.env.HERDR_PLUGIN_STATE_DIR = directory;
+
+  assert.deepEqual(captureAll(), {
+    captured: 0,
+    actions: [{ pane_id: 'w1:p1', skipped: 'no_agent' }],
+    pruned: 1,
+  });
+  assert.equal(readRecord('w9:p9'), null);
+  assert.ok(
+    fs.existsSync(path.join(directory, 'panes', 'w9%3Ap9.json.123.tmp')),
+    'non-record files must be left alone',
+  );
+
+  fs.rmSync(directory, { recursive: true, force: true });
+  delete process.env.HERDR_BIN_PATH;
+  delete process.env.HERDR_PLUGIN_STATE_DIR;
+});
+
+test('captures a pi session whose file is not written yet', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
+  const executable = path.join(directory, 'herdr');
+  const piDirectory = path.join(directory, 'pi');
+  fs.mkdirSync(piDirectory, { recursive: true });
+  const sessionPath = path.join(piDirectory, 'not-yet-written.jsonl');
+  fs.writeFileSync(executable, `#!/bin/sh
+case "$1 $2" in
+  'pane get') printf '%s\\n' '${JSON.stringify({ id: 'x', result: { pane: { pane_id: 'w1:p1', agent: 'pi', agent_session: { agent: 'pi', kind: 'path', value: sessionPath } } } })}' ;;
+  'pane process-info') printf '%s\\n' '{"id":"x","result":{"process_info":{"foreground_processes":[{"pid":999999999,"name":"pi","argv":["pi"]}]}}}' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`);
+  fs.chmodSync(executable, 0o755);
+  process.env.HERDR_BIN_PATH = executable;
+  process.env.HERDR_PLUGIN_STATE_DIR = directory;
+  process.env.HERDR_DURABLE_PI_SESSIONS = piDirectory;
+
+  const result = captureFromEvent(JSON.stringify({
+    event: 'pane_agent_detected',
+    data: { pane_id: 'w1:p1', agent: 'pi' },
+  }));
+  assert.equal(result.captured, true);
+  assert.deepEqual(readRecord('w1:p1'), {
+    agent: 'pi',
+    session: sessionPath,
+    argv: ['pi'],
+  });
+
+  fs.rmSync(directory, { recursive: true, force: true });
+  delete process.env.HERDR_BIN_PATH;
+  delete process.env.HERDR_PLUGIN_STATE_DIR;
+  delete process.env.HERDR_DURABLE_PI_SESSIONS;
+});
+
+test('restores pi without a session file and skips codex sessions that vanished', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
+  const executable = path.join(directory, 'herdr');
+  const piDirectory = path.join(directory, 'pi');
+  const codexDirectory = path.join(directory, 'codex');
+  fs.mkdirSync(piDirectory, { recursive: true });
+  fs.mkdirSync(codexDirectory, { recursive: true });
+  const sessionPath = path.join(piDirectory, 'gone.jsonl');
+  const panes = [
+    { pane_id: 'w1:p1', agent: 'pi', agent_session: { agent: 'pi', kind: 'path', value: sessionPath } },
+    { pane_id: 'w1:p2', agent: 'codex', agent_session: { agent: 'codex', kind: 'id', value: 'vanished' } },
+  ];
+  fs.writeFileSync(executable, `#!/bin/sh
+case "$1 $2" in
+  'pane list') printf '%s\\n' '${JSON.stringify({ id: 'x', result: { panes } })}' ;;
+  'pane process-info') printf '%s\\n' '{"id":"x","result":{"process_info":{"foreground_processes":[{"pid":123,"name":"zsh"}]}}}' ;;
+  'pane run') printf '%s\\n' "$*" >> ${JSON.stringify(path.join(directory, 'runs'))}; printf '%s\\n' '{"id":"x","result":{"ok":true}}' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`);
+  fs.chmodSync(executable, 0o755);
+  fs.mkdirSync(path.join(directory, 'panes'), { recursive: true });
+  fs.writeFileSync(
+    path.join(directory, 'panes', 'w1%3Ap1.json'),
+    JSON.stringify({ agent: 'pi', session: sessionPath, argv: ['pi'] }),
+  );
+  fs.writeFileSync(
+    path.join(directory, 'panes', 'w1%3Ap2.json'),
+    JSON.stringify({ agent: 'codex', session: 'vanished', argv: ['/codex', '--yolo'] }),
+  );
+  process.env.HERDR_BIN_PATH = executable;
+  process.env.HERDR_PLUGIN_STATE_DIR = directory;
+  process.env.HERDR_DURABLE_PI_SESSIONS = piDirectory;
+  process.env.HERDR_DURABLE_CODEX_SESSIONS = codexDirectory;
+
+  const result = restorePanes();
+  assert.equal(result.restored, 1);
+  assert.deepEqual(result.actions.map(action => [action.pane_id, action.skipped ?? null]), [
+    ['w1:p1', null],
+    ['w1:p2', 'missing_session'],
+  ]);
+  const commands = fs.readFileSync(path.join(directory, 'runs'), 'utf8').trim().split('\n');
+  assert.deepEqual(commands, [`pane run w1:p1 pi --session ${sessionPath}`]);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+  delete process.env.HERDR_BIN_PATH;
+  delete process.env.HERDR_PLUGIN_STATE_DIR;
+  delete process.env.HERDR_DURABLE_PI_SESSIONS;
+  delete process.env.HERDR_DURABLE_CODEX_SESSIONS;
 });
 
 test('builds agent-specific resume commands', () => {
@@ -131,7 +300,9 @@ test('validates persisted agent sessions', () => {
   assert.equal(sessionExists('claude', 'missing'), false);
   assert.equal(sessionExists('pi', 'psess'), true);
   assert.equal(sessionExists('pi', path.join(piDirectory, 'psess.jsonl')), true);
-  assert.equal(sessionExists('pi', path.join(piDirectory, 'missing.jsonl')), false);
+  assert.equal(sessionExists('pi', path.join(piDirectory, 'missing.jsonl')), true);
+  assert.equal(sessionExists('pi', path.join(directory, 'outside.jsonl')), false);
+  assert.equal(sessionExists('pi', '/tmp/escape.jsonl'), false);
   fs.rmSync(directory, { recursive: true, force: true });
   delete process.env.HERDR_DURABLE_CODEX_SESSIONS;
   delete process.env.HERDR_DURABLE_CLAUDE_SESSIONS;
@@ -285,7 +456,7 @@ esac
   );
   fs.writeFileSync(
     path.join(directory, 'panes', 'w9%3Ap9.json'),
-    JSON.stringify({ agent: 'pi', session: 'missing', argv: ['/pi'] }),
+    JSON.stringify({ agent: 'pi', session: path.join(piDirectory, 'gone.jsonl'), argv: ['/pi'] }),
   );
   process.env.HERDR_BIN_PATH = executable;
   process.env.HERDR_PLUGIN_STATE_DIR = directory;
@@ -310,11 +481,11 @@ esac
         pane_id: 'w9:p9',
         label: null,
         saved_agent: 'pi',
-        saved_session: 'missing',
+        saved_session: path.join(piDirectory, 'gone.jsonl'),
         pane_agent: null,
         pane_session: null,
         matches_pane: false,
-        session_exists: false,
+        session_exists: true,
         orphaned: true,
       },
     ],

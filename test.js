@@ -84,6 +84,7 @@ test('startup retries until the Herdr API returns data', async () => {
     [path.join(__dirname, 'plugin.js'), 'restore'],
     {
       env: { ...process.env, HERDR_BIN_PATH: executable, HERDR_PLUGIN_STATE_DIR: directory },
+      cwd: directory,
     },
   );
   let stdout = '';
@@ -108,5 +109,20 @@ test('installer edits resume setting idempotently', () => {
   assert.equal(fs.readFileSync(file, 'utf8').match(/resume_agents_on_restore = false/g).length, 1);
   updateConfig(true);
   assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /resume_agents_on_restore/);
+  delete process.env.HERDR_CONFIG_PATH;
+});
+
+test('installer preserves an existing session section', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
+  const file = path.join(directory, 'config.toml');
+  fs.writeFileSync(file, '[session]\nresume_agents_on_restore = true\n');
+  process.env.HERDR_CONFIG_PATH = file;
+  updateConfig(false);
+  const content = fs.readFileSync(file, 'utf8');
+  assert.equal(content.match(/^\[session\]$/gm).length, 1);
+  assert.match(content, /\[session\]\nresume_agents_on_restore = false\n/);
+  updateConfig(true);
+  assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /resume_agents_on_restore/);
+  fs.rmSync(directory, { recursive: true, force: true });
   delete process.env.HERDR_CONFIG_PATH;
 });

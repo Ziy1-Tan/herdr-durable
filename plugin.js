@@ -5,7 +5,6 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
-const SUPPORTED_AGENTS = new Set(['claude', 'codex', 'pi']);
 const API_TIMEOUT_MS = 10_000;
 const API_COMMAND_TIMEOUT_MS = 1_000;
 const API_SLEEP_INTERVAL_MS = 100;
@@ -14,6 +13,7 @@ const RESUME_ARGUMENTS = {
   claude: '--resume',
   pi: '--session',
 };
+const SUPPORTED_AGENTS = new Set(Object.keys(RESUME_ARGUMENTS));
 
 function herdr() {
   return process.env.HERDR_BIN_PATH || 'herdr';
@@ -44,7 +44,7 @@ function herdrJson(args) {
   return response;
 }
 
-function runPaneCommand(paneId, command, agent) {
+function runPaneCommand(paneId, command) {
   const result = runHerdr(['pane', 'run', paneId, command], { timeout: 30_000 });
   if (result.status !== 0) throw new Error(result.stderr || result.stdout || 'pane run failed');
   return true;
@@ -193,28 +193,33 @@ function restorePanes({ dryRun = false } = {}) {
   const response = herdrJson(['pane', 'list']);
   const panes = response?.result?.panes || [];
   const actions = [];
+  let restored = 0;
 
   for (const pane of panes) {
     const record = state.panes[pane.pane_id];
     if (!shouldRestore(record, pane)) continue;
-    const info = processInfo(pane.pane_id);
-    if (firstAgentProcess(info, record.agent)) continue;
-    const argv = launchArgv(record.agent, record.argv, record.session);
-    const command = shellCommand(argv);
-    const action = { pane_id: pane.pane_id, agent: record.agent, session: record.session, command };
-    if (!dryRun) {
-      try {
-        runPaneCommand(pane.pane_id, command, record.agent);
-        delete state.panes[pane.pane_id];
-        writeState(state);
-      } catch (error) {
-        action.error = error.message;
+    const action = { pane_id: pane.pane_id, agent: record.agent, session: record.session };
+    try {
+      const info = processInfo(pane.pane_id);
+      if (firstAgentProcess(info, record.agent)) continue;
+      const command = shellCommand(launchArgv(record.agent, record.argv, record.session));
+      action.command = command;
+      if (dryRun) {
+        actions.push(action);
+        continue;
       }
+      runPaneCommand(pane.pane_id, command);
+      delete state.panes[pane.pane_id];
+      writeState(state);
+      restored += 1;
+      actions.push(action);
+    } catch (error) {
+      action.error = error.message;
+      actions.push(action);
     }
-    actions.push(action);
   }
 
-  return { restored: actions.length, actions };
+  return { restored, actions };
 }
 
 function main() {

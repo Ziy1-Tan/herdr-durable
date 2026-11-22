@@ -36,9 +36,29 @@ herdr plugin uninstall herdr-durable
 
 1. On `pane_agent_detected` and `pane_agent_status_changed`, the plugin records the pane, agent, session, cwd, and foreground argv.
 2. On plugin startup, it reads restored panes, matches saved sessions, and runs the reconstructed resume command in each matching pane.
-3. A successful restore deletes the record. Panes with a live agent process are left unchanged.
+3. Saved state is kept. Panes with a live agent process are left unchanged, so a manual restore can retry a failed resume.
 
 State is stored only in Herdr's plugin state directory.
+
+## Manual recovery
+
+Automatic restore runs when Herdr starts. If a resume fails, or you want to inspect what was saved:
+
+```sh
+herdr plugin action invoke herdr-durable.status
+herdr plugin action invoke herdr-durable.restore-dry-run
+herdr plugin action invoke herdr-durable.restore
+herdr plugin action invoke herdr-durable.save
+```
+
+Herdr shows a notification with the result. The full JSON is in `herdr plugin log list --plugin herdr-durable`.
+
+- `status` shows every saved pane, whether the pane still exists, and whether its session file is present.
+- `restore-dry-run` shows the exact commands without running them.
+- `restore` retries only idle panes with saved sessions. Running agents are skipped, so it is safe to run again.
+- `save` captures the agents running in Herdr now.
+
+The plugin never starts an agent when its session file is missing, because that would open a blank conversation. Restore the transcript from a backup, or start a new chat.
 
 ## Test
 

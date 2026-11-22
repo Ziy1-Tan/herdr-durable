@@ -93,10 +93,6 @@ function writeRecord(paneId, record) {
   fs.renameSync(temp, file);
 }
 
-function deleteRecord(paneId) {
-  fs.rmSync(stateFile(paneId), { force: true });
-}
-
 function parseEvent(raw) {
   if (!raw) return null;
   const event = JSON.parse(raw);
@@ -222,6 +218,37 @@ function captureFromEvent(rawEvent) {
   return { captured, pane_id: event.paneId, agent: event.agent || null };
 }
 
+function captureAll() {
+  const response = herdrJson(['pane', 'list']);
+  const panes = response?.result?.panes || [];
+  const actions = [];
+  let captured = 0;
+
+  for (const pane of panes) {
+    const action = { pane_id: pane.pane_id };
+    if (!pane.agent_session) {
+      action.skipped = 'no_agent';
+      actions.push(action);
+      continue;
+    }
+    try {
+      if (capturePane(pane.pane_id)) {
+        captured += 1;
+        action.captured = true;
+      } else {
+        action.captured = false;
+        action.skipped = 'unreadable_process';
+      }
+    } catch (error) {
+      action.captured = false;
+      action.error = error.message;
+    }
+    actions.push(action);
+  }
+
+  return { captured, actions };
+}
+
 function shouldRestore(record, pane) {
   if (!record || !record.argv || !record.session) return false;
   const session = pane.agent_session;
@@ -265,7 +292,6 @@ function restorePanes({ dryRun = false } = {}) {
         continue;
       }
       runPaneCommand(pane.pane_id, command);
-      deleteRecord(pane.pane_id);
       restored += 1;
       actions.push(action);
     } catch (error) {
@@ -277,24 +303,99 @@ function restorePanes({ dryRun = false } = {}) {
   return { restored, actions };
 }
 
+function status() {
+  const root = stateRoot();
+  fs.mkdirSync(root, { recursive: true });
+  const response = herdrJson(['pane', 'list']);
+  const panes = response?.result?.panes || [];
+  const paneById = new Map(panes.map(pane => [pane.pane_id, pane]));
+  const records = fs.readdirSync(root)
+    .filter(file => file.endsWith('.json'))
+    .map(file => {
+      let paneId;
+      try {
+        paneId = decodeURIComponent(file.slice(0, -5));
+      } catch {
+        return null;
+      }
+      const record = readRecord(paneId);
+      if (!record) return null;
+      const pane = paneById.get(paneId);
+      return {
+        pane_id: paneId,
+        label: pane?.label || null,
+        saved_agent: record.agent,
+        saved_session: record.session,
+        pane_agent: pane?.agent_session?.agent || null,
+        pane_session: pane?.agent_session?.value || null,
+        matches_pane: pane ? shouldRestore(record, pane) : false,
+        session_exists: sessionExists(record.agent, record.session),
+        orphaned: !pane,
+      };
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.pane_id.localeCompare(right.pane_id));
+  return { saved: records.length, records };
+}
+
+function notify(title, body) {
+  try {
+    runHerdr(['notification', 'show', title, '--body', body]);
+  } catch {}
+}
+
+function restoreSummary(result, { dryRun = false } = {}) {
+  const skipped = result.actions.filter(action => action.skipped || action.error).length;
+  const count = dryRun
+    ? result.actions.filter(action => action.command).length
+    : result.restored;
+  const verb = dryRun ? 'ready' : 'restored';
+  return `${count} ${verb}${skipped ? `, ${skipped} skipped` : ''}`;
+}
+
+function statusSummary(result) {
+  const missing = result.records.filter(record => !record.session_exists).length;
+  const orphaned = result.records.filter(record => record.orphaned).length;
+  return [
+    `${result.saved} saved`,
+    missing ? `${missing} missing session` : null,
+    orphaned ? `${orphaned} orphaned` : null,
+  ].filter(Boolean).join(', ');
+}
+
 function main() {
-  const mode = process.argv[2] || 'restore';
+  const mode = process.argv[2];
+  if (!mode) {
+    console.log(JSON.stringify(restorePanes()));
+    return;
+  }
   if (mode === 'capture') {
     const result = captureFromEvent(process.env.HERDR_PLUGIN_EVENT_JSON);
     console.log(JSON.stringify(result));
     return;
   }
+  if (mode === 'capture-all') {
+    const result = captureAll();
+    console.log(JSON.stringify(result));
+    notify('Herdr Durable', `Saved ${result.captured} session${result.captured === 1 ? '' : 's'}.`);
+    return;
+  }
   if (mode === 'restore') {
-    console.log(JSON.stringify(restorePanes()));
+    const result = restorePanes();
+    console.log(JSON.stringify(result));
+    notify('Herdr Durable', restoreSummary(result));
     return;
   }
   if (mode === 'dry-run') {
-    console.log(JSON.stringify(restorePanes({ dryRun: true })));
+    const result = restorePanes({ dryRun: true });
+    console.log(JSON.stringify(result));
+    notify('Herdr Durable preview', restoreSummary(result, { dryRun: true }));
     return;
   }
   if (mode === 'status') {
-    fs.mkdirSync(stateRoot(), { recursive: true });
-    console.log(JSON.stringify({ panes: fs.readdirSync(stateRoot()).filter(file => file.endsWith('.json')).length }));
+    const result = status();
+    console.log(JSON.stringify(result));
+    notify('Herdr Durable', statusSummary(result));
     return;
   }
   throw new Error(`unknown mode: ${mode}`);
@@ -311,6 +412,7 @@ if (require.main === module) {
 
 module.exports = {
   SUPPORTED_AGENTS,
+  captureAll,
   captureFromEvent,
   launchArgv,
   normalizeAgent,
@@ -322,5 +424,6 @@ module.exports = {
   shellQuote,
   shouldRestore,
   sessionExists,
+  status,
   validSession,
 };

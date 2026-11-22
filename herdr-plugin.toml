@@ -20,6 +20,34 @@ on = "pane.agent_status_changed"
 command = ["node", "plugin.js", "capture"]
 
 [[actions]]
+id = "restore"
+title = "Herdr Durable: restore saved sessions"
+description = "Re-run resume commands for saved agents"
+contexts = ["global"]
+command = ["node", "plugin.js", "restore"]
+
+[[actions]]
+id = "restore-dry-run"
+title = "Herdr Durable: preview restore"
+description = "Show resume commands without running them"
+contexts = ["global"]
+command = ["node", "plugin.js", "dry-run"]
+
+[[actions]]
+id = "save"
+title = "Herdr Durable: save current sessions"
+description = "Capture the agents running in Herdr right now"
+contexts = ["global"]
+command = ["node", "plugin.js", "capture-all"]
+
+[[actions]]
+id = "status"
+title = "Herdr Durable: show saved sessions"
+description = "Show saved agents and whether their session files still exist"
+contexts = ["global"]
+command = ["node", "plugin.js", "status"]
+
+[[actions]]
 id = "enable-native-resume"
 title = "Herdr Durable: enable native resume"
 description = "Restore Herdr's built-in agent resume before uninstalling"

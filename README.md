@@ -2,16 +2,23 @@
 
 Keep Claude Code, Codex, and Pi running in your [Herdr](https://herdr.dev) panes across server restarts.
 
-Herdr saves your workspaces, tabs, panes, and agent sessions when its server stops, and restores them when it starts again. The built-in restore command does not keep the options a chat was started with. herdr-durable remembers the original launch arguments and sends the right resume command back to the same pane.
+The built-in herdr restore drops permission and sandbox bypass flags such as `-dangerously-bypass-approvals-and-sandbox` and `--dangerously-skip-permissions`. herdr-durable remembers the original launch arguments and sends the right resume command back to the same pane.
 
 | Running in the pane | After a restart |
 | --- | --- |
-| Claude Code with `--permission-mode` | Reopens with that option: `claude <options> --resume <id>` |
-| Codex with `--yolo` | Reopens with that option: `codex <options> resume <id>` |
-| Pi | Reopens on its conversation: `pi <options> --session <path>` |
-| Plain shell or non-agent process | Left alone |
+| Claude Code | Reopens with that option: `claude <options> --resume <id>` |
+| Codex | Reopens with that option: `codex <options> resume <id>` |
+| Pi | Reopens it: `pi <options> --session <path>` |
+| Non-agent process | Left alone |
 
-Chats come back in the same pane, tab, workspace, and folder.
+## Prerequisites
+
+Set this in `~/.config/herdr/config.toml`:
+
+```toml
+[session]
+resume_agents_on_restore = false
+```
 
 ## Install
 
@@ -28,49 +35,27 @@ herdr plugin update herdr-durable
 Uninstall:
 
 ```sh
-herdr plugin action invoke herdr-durable.enable-native-resume
 herdr plugin uninstall herdr-durable
 ```
 
 ## How it works
 
-1. On `pane_agent_detected` and `pane_agent_status_changed`, the plugin records the pane, agent, session, and foreground argv. Agents report their session some time after the process appears and write their session files even later, so capture retries for up to 30 seconds until both are present.
-2. On plugin startup, it reads restored panes, matches saved sessions, and runs the reconstructed resume command in each matching pane.
-3. Saved state is kept. Panes with a live agent process are left unchanged, so a manual restore can retry a failed resume.
+1. The plugin records each agent's pane, session, and launch arguments while it runs.
+2. On Herdr startup, it matches saved sessions with restored panes and sends each pane its original resume command.
+3. Saved state is kept. Only idle panes are restored, so a failed resume can be retried manually.
 
 State is stored only in Herdr's plugin state directory.
 
-## Manual recovery
+## Using it
 
-Automatic restore runs when Herdr starts. If a resume fails, or you want to inspect what was saved:
-
-```sh
-herdr plugin action invoke herdr-durable.status
-herdr plugin action invoke herdr-durable.restore-dry-run
-herdr plugin action invoke herdr-durable.restore
-herdr plugin action invoke herdr-durable.save
-```
-
-Herdr shows a notification with the result. The full JSON is in `herdr plugin log list --plugin herdr-durable`.
-
-- `status` shows every saved pane, whether the pane still exists, and whether its session file is present.
-- `restore-dry-run` shows the exact commands without running them.
-- `restore` retries only idle panes with saved sessions. Running agents are skipped, so it is safe to run again.
-- `save` captures the agents running in Herdr now and removes saved records whose panes no longer exist.
-
-The plugin never starts Claude or Codex when their session file is missing, because a resume would open a blank conversation. Restore the transcript from a backup, or start a new chat. Pi is the exception: it creates its session file only after the first message, so a Pi pane is restored to its session path even while the file is absent, and Pi opens that path fresh.
-
-## Test
+Automatic restore runs when Herdr starts. The actions help inspect or retry saved sessions:
 
 ```sh
-npm test
-npm run test:e2e
-npm run test:e2e -- codex
+herdr plugin action invoke herdr-durable.status          # Show saved sessions
+herdr plugin action invoke herdr-durable.restore-dry-run # Preview resume commands
+herdr plugin action invoke herdr-durable.restore         # Retry restore in idle panes
+herdr plugin action invoke herdr-durable.save            # Capture agents running now
 ```
-
-`npm test` covers command construction, session validation, capture, and multi-pane restore logic. `npm run test:e2e` starts a headless Herdr server, seeds a session snapshot, and restores fake Codex, Claude, and Pi panes. It needs no model access.
-
-For a release check against the real agents, run `npm run test:e2e:real` after signing in to each agent and trusting the repository directory.
 
 ## License
 

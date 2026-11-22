@@ -1,51 +1,56 @@
 #!/usr/bin/env node
-'use strict';
 
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-
-const CONFIG_COMMENT = '# herdr-durable: disable built-in argv-less agent resume';
-const DISABLED_SESSION = `${CONFIG_COMMENT}\n[session]\nresume_agents_on_restore = false\n`;
-const SESSION_HEADER = /^\[session\]$/;
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 function configPath() {
   return process.env.HERDR_CONFIG_PATH || path.join(os.homedir(), '.config', 'herdr', 'config.toml');
 }
 
-function updateConfig(enableRestore) {
-  const file = configPath();
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  let content = '';
+function nativeResumeDisabled() {
+  let content;
   try {
-    content = fs.readFileSync(file, 'utf8');
+    content = fs.readFileSync(configPath(), 'utf8');
   } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
+    if (error.code === 'ENOENT') return false;
+    throw error;
   }
 
-  const lines = content
-    .split(/\r?\n/)
-    .filter(line => !/^resume_agents_on_restore\s*=/.test(line.trim()) && line.trim() !== CONFIG_COMMENT);
-  if (!enableRestore) {
-    const sessionHeader = lines.findIndex(line => SESSION_HEADER.test(line.trim()));
-    if (sessionHeader >= 0) {
-      lines.splice(sessionHeader + 1, 0, 'resume_agents_on_restore = false');
-    } else {
-      lines.push('', DISABLED_SESSION);
+  let section = '';
+  for (const rawLine of content.split(/\r?\n/)) {
+    const line = rawLine.trim().replace(/\s+#.*$/, '');
+    if (!line || line.startsWith('#')) continue;
+    const header = line.match(/^\[([^\]]+)\]$/);
+    if (header) {
+      section = header[1];
+      continue;
     }
+    const setting = line.match(/^(session\.)?resume_agents_on_restore\s*=\s*(true|false)$/);
+    if (!setting) continue;
+    if (section === 'session' || setting[1]) return setting[2] === 'false';
   }
-  fs.writeFileSync(file, `${lines.join('\n').replace(/\n{3,}/g, '\n\n')}\n`);
+  return false;
 }
 
 function main() {
   const mode = process.argv[2];
-  if (mode !== 'enable' && mode !== 'disable') {
-    throw new Error('Usage: node configure.js <enable|disable>');
+  if (mode !== 'check') {
+    throw new Error('Usage: node configure.js check');
   }
-  updateConfig(mode === 'enable');
+  if (!nativeResumeDisabled()) {
+    throw new Error('session.resume_agents_on_restore must be false before installing; see README Prerequisites');
+  }
 }
 
-if (require.main === module) {
+let invokedAsScript = false;
+try {
+  invokedAsScript = process.argv[1] !== undefined
+    && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+} catch {}
+
+if (invokedAsScript) {
   try {
     main();
   } catch (error) {
@@ -54,4 +59,4 @@ if (require.main === module) {
   }
 }
 
-module.exports = { DISABLED_SESSION, updateConfig };
+export { nativeResumeDisabled };

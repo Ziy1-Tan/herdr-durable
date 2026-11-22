@@ -13,14 +13,14 @@ import {
   waitFor,
   writeConfig,
   writeSnapshot,
-} from "./e2e-harness.mjs";
+} from "./e2e-harness.js";
 
 const SUPPORTED_AGENTS = ["codex", "claude", "pi"];
 const requested = process.argv.slice(2);
 const agents = requested.length === 0 ? SUPPORTED_AGENTS : [...new Set(requested)];
 for (const agent of agents) {
   if (!SUPPORTED_AGENTS.includes(agent)) {
-    throw new Error(`usage: node e2e-real.mjs [${SUPPORTED_AGENTS.join("|")} ...]`);
+    throw new Error(`usage: node e2e-real.js [${SUPPORTED_AGENTS.join("|")} ...]`);
   }
 }
 

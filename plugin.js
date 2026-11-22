@@ -1,10 +1,11 @@
 #!/usr/bin/env node
-'use strict';
 
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { nativeResumeDisabled } from './configure.js';
 
 const API_TIMEOUT_MS = 20_000;
 const API_COMMAND_TIMEOUT_MS = 10_000;
@@ -12,7 +13,6 @@ const API_SLEEP_INTERVAL_MS = 100;
 const CAPTURE_RETRY_MS = 30_000;
 const CAPTURE_ALL_RETRY_MS = 5_000;
 const CAPTURE_POLL_INTERVAL_MS = 500;
-const RETRYABLE_CAPTURE_REASONS = new Set(['no_agent_session', 'missing_session', 'error']);
 const RESUME_ARGUMENTS = {
   codex: 'resume',
   claude: '--resume',
@@ -126,7 +126,7 @@ function validSession(value) {
   return typeof value === 'string' && value.length <= 1024 && !value.includes('\0');
 }
 
-function sessionExists(agent, session) {
+function sessionUsable(agent, session) {
   if (!validSession(session)) return false;
   const directory = process.env[SESSION_DIRECTORY_ENV[agent]] || SESSION_DIRECTORIES[agent];
   if (!directory) return false;
@@ -174,10 +174,9 @@ function processInfo(paneId) {
 }
 
 function firstAgentProcess(info, agent) {
-  return (info.foreground_processes || []).find(process => {
-    if (process.name !== agent || typeof process.pid !== 'number') return false;
-    return true;
-  });
+  return (info.foreground_processes || []).find(
+    process => process.name === agent && typeof process.pid === 'number',
+  );
 }
 
 function readProcArgv(pid) {
@@ -194,12 +193,12 @@ function capturePane(paneId, agentOverride) {
   const pane = readPane(paneId);
   const agent = normalizeAgent(agentOverride || pane.agent || pane.agent_session?.agent);
   if (!agent) return { captured: false, reason: 'unsupported_agent' };
-  if (!pane.agent_session) return { captured: false, reason: 'no_agent_session' };
+  if (!pane.agent_session) return { captured: false, reason: 'no_agent_session', retry: true };
   if (pane.agent_session.agent !== agent) return { captured: false, reason: 'agent_mismatch' };
 
   const session = pane.agent_session.value;
   if (!validSession(session)) return { captured: false, reason: 'invalid_session' };
-  if (!sessionExists(agent, session)) return { captured: false, reason: 'missing_session' };
+  if (!sessionUsable(agent, session)) return { captured: false, reason: 'missing_session', retry: true };
 
   const info = processInfo(paneId);
   const process = firstAgentProcess(info, agent);
@@ -227,10 +226,9 @@ function captureWithRetry(paneId, agentOverride, waitMs = CAPTURE_RETRY_MS) {
     try {
       outcome = capturePane(paneId, agentOverride);
     } catch (error) {
-      outcome = { captured: false, reason: 'error', error: error.message };
+      outcome = { captured: false, reason: 'error', error: error.message, retry: true };
     }
-    if (outcome.captured || !RETRYABLE_CAPTURE_REASONS.has(outcome.reason)) return outcome;
-    if (Date.now() >= deadline) return outcome;
+    if (outcome.captured || !outcome.retry || Date.now() >= deadline) return outcome;
     sleep(CAPTURE_POLL_INTERVAL_MS);
   }
 }
@@ -239,12 +237,13 @@ function captureFromEvent(rawEvent) {
   const event = parseEvent(rawEvent);
   if (!event) return { captured: false, reason: 'ignored_event' };
   const outcome = captureWithRetry(event.paneId, event.agent);
-  const result = { captured: outcome.captured };
-  if (outcome.reason) result.reason = outcome.reason;
-  if (outcome.error) result.error = outcome.error;
-  result.pane_id = event.paneId;
-  result.agent = event.agent || null;
-  return result;
+  return {
+    captured: outcome.captured,
+    reason: outcome.reason,
+    error: outcome.error,
+    pane_id: event.paneId,
+    agent: event.agent || null,
+  };
 }
 
 function pruneRecords(paneIds) {
@@ -293,7 +292,7 @@ function captureAll() {
       captured += 1;
       action.captured = true;
     } else {
-      action.skipped = outcome.reason || 'not_captured';
+      action.skipped = outcome.reason;
       if (outcome.error) action.error = outcome.error;
     }
     actions.push(action);
@@ -327,7 +326,7 @@ function restorePanes({ dryRun = false } = {}) {
       actions.push(action);
       continue;
     }
-    if (!sessionExists(record.agent, record.session)) {
+    if (!sessionUsable(record.agent, record.session)) {
       action.skipped = 'missing_session';
       actions.push(action);
       continue;
@@ -383,7 +382,7 @@ function status() {
         pane_agent: pane?.agent_session?.agent || null,
         pane_session: pane?.agent_session?.value || null,
         matches_pane: pane ? shouldRestore(record, pane) : false,
-        session_exists: sessionExists(record.agent, record.session),
+        session_exists: sessionUsable(record.agent, record.session),
         orphaned: !pane,
       };
     })
@@ -396,6 +395,15 @@ function notify(title, body) {
   try {
     runHerdr(['notification', 'show', title, '--body', body]);
   } catch {}
+}
+
+function nativeResumeGuard() {
+  if (process.env.HERDR_DURABLE_TEST === '1') return true;
+  if (nativeResumeDisabled()) return true;
+  const message = 'session.resume_agents_on_restore must be false; see README Prerequisites';
+  notify('Herdr Durable disabled', message);
+  console.error(`herdr-durable: ${message}`);
+  return false;
 }
 
 function restoreSummary(result, { dryRun = false } = {}) {
@@ -419,6 +427,10 @@ function statusSummary(result) {
 
 function main() {
   const mode = process.argv[2];
+  if (!nativeResumeGuard()) {
+    process.exitCode = 1;
+    return;
+  }
   if (!mode) {
     console.log(JSON.stringify(restorePanes()));
     return;
@@ -459,7 +471,13 @@ function main() {
   throw new Error(`unknown mode: ${mode}`);
 }
 
-if (require.main === module) {
+let invokedAsScript = false;
+try {
+  invokedAsScript = process.argv[1] !== undefined
+    && fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+} catch {}
+
+if (invokedAsScript) {
   try {
     main();
   } catch (error) {
@@ -468,7 +486,7 @@ if (require.main === module) {
   }
 }
 
-module.exports = {
+export {
   SUPPORTED_AGENTS,
   captureAll,
   captureFromEvent,
@@ -482,7 +500,7 @@ module.exports = {
   readProcArgv,
   shellQuote,
   shouldRestore,
-  sessionExists,
+  sessionUsable,
   status,
   validSession,
 };

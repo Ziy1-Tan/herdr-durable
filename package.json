@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "Keep Claude, Codex, and Pi launch arguments across Herdr restarts",
   "license": "MIT",
+  "type": "module",
   "files": [
     "LICENSE",
     "README.md",
@@ -16,9 +17,9 @@
   "scripts": {
     "test": "node --test test.js",
     "test:core": "node --test test.js",
-    "test:e2e": "node e2e-test.mjs",
-    "test:e2e:real": "node e2e-real.mjs",
-    "test:e2e:all": "node e2e-test.mjs && node e2e-real.mjs",
+    "test:e2e": "node e2e-test.js",
+    "test:e2e:real": "node e2e-real.js",
+    "test:e2e:all": "node e2e-test.js && node e2e-real.js",
     "prepublishOnly": "npm test"
   }
 }

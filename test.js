@@ -1,15 +1,16 @@
-const test = require('node:test');
-const assert = require('node:assert/strict');
-const fs = require('node:fs');
-const os = require('node:os');
-const path = require('node:path');
-const { spawn } = require('node:child_process');
-const { once } = require('node:events');
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn, spawnSync } from 'node:child_process';
+import { once } from 'node:events';
+import { fileURLToPath } from 'node:url';
 
-const {
+import {
   captureAll,
   captureFromEvent,
-  sessionExists,
+  sessionUsable,
   restorePanes,
   readRecord,
   launchArgv,
@@ -20,8 +21,12 @@ const {
   shouldRestore,
   status,
   validSession,
-} = require('./plugin.js');
-const { updateConfig } = require('./configure.js');
+} from './plugin.js';
+import { nativeResumeDisabled } from './configure.js';
+
+process.env.HERDR_DURABLE_TEST = '1';
+
+const pluginScript = fileURLToPath(new URL('./plugin.js', import.meta.url));
 
 test('normalizes supported agents', () => {
   assert.equal(normalizeAgent('Codex'), 'codex');
@@ -255,6 +260,7 @@ esac
 
 test('builds agent-specific resume commands', () => {
   assert.deepEqual(launchArgv('codex', ['/codex', '--yolo'], 'id'), ['codex', '--yolo', 'resume', 'id']);
+  assert.deepEqual(launchArgv('codex', ['/codex', '--dangerously-bypass-approvals-and-sandbox'], 'id'), ['codex', '--dangerously-bypass-approvals-and-sandbox', 'resume', 'id']);
   assert.deepEqual(launchArgv('codex', ['/codex', '--yolo', 'resume', 'old'], 'id'), ['codex', '--yolo', 'resume', 'id']);
   assert.deepEqual(launchArgv('claude', ['/claude', '--model', 'x'], 'id'), ['claude', '--model', 'x', '--resume', 'id']);
   assert.deepEqual(launchArgv('claude', ['/claude', '--model', 'x', '--resume', 'old'], 'id'), ['claude', '--model', 'x', '--resume', 'id']);
@@ -295,14 +301,14 @@ test('validates persisted agent sessions', () => {
   process.env.HERDR_DURABLE_CODEX_SESSIONS = codexDirectory;
   process.env.HERDR_DURABLE_CLAUDE_SESSIONS = claudeDirectory;
   process.env.HERDR_DURABLE_PI_SESSIONS = piDirectory;
-  assert.equal(sessionExists('codex', 'id'), true);
-  assert.equal(sessionExists('claude', 'id'), true);
-  assert.equal(sessionExists('claude', 'missing'), false);
-  assert.equal(sessionExists('pi', 'psess'), true);
-  assert.equal(sessionExists('pi', path.join(piDirectory, 'psess.jsonl')), true);
-  assert.equal(sessionExists('pi', path.join(piDirectory, 'missing.jsonl')), true);
-  assert.equal(sessionExists('pi', path.join(directory, 'outside.jsonl')), false);
-  assert.equal(sessionExists('pi', '/tmp/escape.jsonl'), false);
+  assert.equal(sessionUsable('codex', 'id'), true);
+  assert.equal(sessionUsable('claude', 'id'), true);
+  assert.equal(sessionUsable('claude', 'missing'), false);
+  assert.equal(sessionUsable('pi', 'psess'), true);
+  assert.equal(sessionUsable('pi', path.join(piDirectory, 'psess.jsonl')), true);
+  assert.equal(sessionUsable('pi', path.join(piDirectory, 'missing.jsonl')), true);
+  assert.equal(sessionUsable('pi', path.join(directory, 'outside.jsonl')), false);
+  assert.equal(sessionUsable('pi', '/tmp/escape.jsonl'), false);
   fs.rmSync(directory, { recursive: true, force: true });
   delete process.env.HERDR_DURABLE_CODEX_SESSIONS;
   delete process.env.HERDR_DURABLE_CLAUDE_SESSIONS;
@@ -506,7 +512,7 @@ test('startup retries until the Herdr API returns data', async () => {
   process.env.HERDR_BIN_PATH = executable;
   const child = spawn(
     process.execPath,
-    [path.join(__dirname, 'plugin.js'), 'restore'],
+    [pluginScript, 'restore'],
     {
       env: { ...process.env, HERDR_BIN_PATH: executable, HERDR_PLUGIN_STATE_DIR: directory },
       cwd: directory,
@@ -524,30 +530,78 @@ test('startup retries until the Herdr API returns data', async () => {
   delete process.env.HERDR_BIN_PATH;
 });
 
-test('installer edits resume setting idempotently', () => {
+test('runtime guard is enabled outside tests', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
+  const executable = path.join(directory, 'herdr');
+  const config = path.join(directory, 'config.toml');
+  const state = path.join(directory, 'state');
+  fs.writeFileSync(config, '[session]\nresume_agents_on_restore = false\n');
+  fs.writeFileSync(executable, `#!/bin/sh\ncase "$1 $2" in\n  'pane list') printf '%s\\n' '{"id":"x","result":{"panes":[]}}' ;;\n  'notification show') exit 0 ;;\n  *) echo "unexpected: $*" >&2; exit 1 ;;\nesac\n`);
+  fs.chmodSync(executable, 0o755);
+  fs.mkdirSync(path.join(state, 'panes'), { recursive: true });
+  fs.writeFileSync(path.join(state, 'panes', 'w1%3Ap1.json'), JSON.stringify({
+    agent: 'codex',
+    session: 'sess',
+    argv: ['/codex'],
+  }));
+
+  const run = extraEnv => spawnSync(process.execPath, [pluginScript], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HERDR_DURABLE_TEST: '',
+      HERDR_BIN_PATH: executable,
+      HERDR_CONFIG_PATH: config,
+      HERDR_PLUGIN_STATE_DIR: state,
+      ...extraEnv,
+    },
+  });
+
+  const enabled = run({});
+  assert.equal(enabled.status, 0, enabled.stderr);
+  assert.deepEqual(JSON.parse(enabled.stdout), { restored: 0, actions: [] });
+
+  fs.writeFileSync(config, '[session]\nresume_agents_on_restore = true\n');
+  const blocked = run({});
+  assert.equal(blocked.status, 1);
+  assert.match(blocked.stderr, /session\.resume_agents_on_restore must be false/);
+  assert.equal(blocked.stdout, '');
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test('install check accepts false in the session section', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
   const file = path.join(directory, 'config.toml');
   process.env.HERDR_CONFIG_PATH = file;
-  updateConfig(false);
-  assert.match(fs.readFileSync(file, 'utf8'), /resume_agents_on_restore = false/);
-  updateConfig(false);
-  assert.equal(fs.readFileSync(file, 'utf8').match(/resume_agents_on_restore = false/g).length, 1);
-  updateConfig(true);
-  assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /resume_agents_on_restore/);
+  fs.writeFileSync(file, '[session]\nresume_agents_on_restore = false\n');
+  assert.equal(nativeResumeDisabled(), true);
+  fs.rmSync(directory, { recursive: true, force: true });
   delete process.env.HERDR_CONFIG_PATH;
 });
 
-test('installer preserves an existing session section', () => {
+test('install check accepts fully qualified false', () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
   const file = path.join(directory, 'config.toml');
-  fs.writeFileSync(file, '[session]\nresume_agents_on_restore = true\n');
+  fs.writeFileSync(file, 'session.resume_agents_on_restore = false # comment\n');
   process.env.HERDR_CONFIG_PATH = file;
-  updateConfig(false);
-  const content = fs.readFileSync(file, 'utf8');
-  assert.equal(content.match(/^\[session\]$/gm).length, 1);
-  assert.match(content, /\[session\]\nresume_agents_on_restore = false\n/);
-  updateConfig(true);
-  assert.doesNotMatch(fs.readFileSync(file, 'utf8'), /resume_agents_on_restore/);
+  assert.equal(nativeResumeDisabled(), true);
+  fs.rmSync(directory, { recursive: true, force: true });
+  delete process.env.HERDR_CONFIG_PATH;
+});
+
+test('install check rejects true, missing config, and unrelated sections', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
+  const file = path.join(directory, 'config.toml');
+  process.env.HERDR_CONFIG_PATH = file;
+  assert.equal(nativeResumeDisabled(), false);
+  fs.writeFileSync(file, '[session]\nresume_agents_on_restore = true\n');
+  assert.equal(nativeResumeDisabled(), false);
+  fs.writeFileSync(file, '[ui]\nresume_agents_on_restore = false\n');
+  assert.equal(nativeResumeDisabled(), false);
+  fs.writeFileSync(file, '[session]\nresume_agents_on_restore = false\n[ui]\nresume_agents_on_restore = true\n');
+  assert.equal(nativeResumeDisabled(), true);
+  fs.unlinkSync(file);
   fs.rmSync(directory, { recursive: true, force: true });
   delete process.env.HERDR_CONFIG_PATH;
 });

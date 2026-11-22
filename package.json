@@ -17,10 +17,8 @@
     "test": "node --test test.js",
     "test:core": "node --test test.js",
     "test:e2e": "node e2e-test.mjs",
-    "test:e2e:all": "node e2e-test.mjs codex && node e2e-test.mjs claude && node e2e-test.mjs pi",
+    "test:e2e:real": "node e2e-real.mjs",
+    "test:e2e:all": "node e2e-test.mjs && node e2e-real.mjs",
     "prepublishOnly": "npm test"
-  },
-  "devDependencies": {
-    "@microsoft/tui-test": "^0.1.1"
   }
 }

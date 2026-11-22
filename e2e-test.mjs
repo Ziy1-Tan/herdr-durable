@@ -1,153 +1,270 @@
-import { TuiTest } from "@microsoft/tui-test";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+#!/usr/bin/env node
+import assert from "node:assert/strict";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { join } from "node:path";
+import {
+  buildSnapshot,
+  cleanEnv,
+  linkPlugin,
+  makeHome,
+  pluginStateDir,
+  startServer,
+  waitFor,
+  writeConfig,
+  writeSnapshot,
+} from "./e2e-harness.mjs";
 
-const agent = process.argv[2];
-const supportedAgents = new Set(["codex", "claude", "pi"]);
-if (!supportedAgents.has(agent)) {
-  throw new Error("usage: node e2e-test.mjs <codex|claude|pi>");
+const SUPPORTED_AGENTS = ["codex", "claude", "pi"];
+const requested = process.argv.slice(2);
+const agents = requested.length === 0 ? SUPPORTED_AGENTS : [...new Set(requested)];
+for (const agent of agents) {
+  if (!SUPPORTED_AGENTS.includes(agent)) {
+    throw new Error(`usage: node e2e-test.mjs [${SUPPORTED_AGENTS.join("|")} ...]`);
+  }
 }
 
-const herdrSession = `herdr-durable-${agent}-e2e`;
-const home = mkdtempSync(join(tmpdir(), `${herdrSession}-`));
-const configDir = join(home, ".config", "herdr");
-mkdirSync(configDir, { recursive: true });
-const currentPlugin = JSON.parse(readFileSync(join(homedir(), ".config", "herdr", "plugins.json"), "utf8"))
-  .find(plugin => plugin.plugin_id === "herdr-durable");
-writeFileSync(join(configDir, "plugins.json"), `${JSON.stringify([currentPlugin], null, 2)}\n`);
-writeFileSync(join(configDir, "config.toml"), `onboarding = false\n\n[experimental]\nallow_nested = true\n\n[session]\nresume_agents_on_restore = false\n`);
-const agentCwd = process.env.HERDR_DURABLE_AGENT_CWD || process.cwd();
-const agentHome = process.env.HERDR_DURABLE_AGENT_HOME || homedir();
-
-const env = {
-  ...process.env,
-  HOME: home,
-  HERDR_CONFIG_PATH: join(configDir, "config.toml"),
+const FLAGS = {
+  codex: ["--no-daemon", "--yolo"],
+  claude: ["--dangerously-skip-permissions", "--model", "opus"],
+  pi: ["--profile", "work"],
 };
-delete env.HERDR_SOCKET_PATH;
-delete env.HERDR_WORKSPACE_ID;
-delete env.HERDR_TAB_ID;
-delete env.HERDR_PANE_ID;
 
-const stateRoot = join(home, ".local", "state", "herdr", "plugins", "herdr-durable", "panes");
-const terminal = TuiTest.ephemeral(herdrSession);
-const agentName = `durable-${agent}-${Date.now()}`;
-function runHerdr(args) {
-  return execFileSync("herdr", ["--session", herdrSession, ...args], {
-    encoding: "utf8",
-    env,
-    timeout: 30_000,
-  });
+function resumeArguments(agent, session) {
+  if (agent === "codex") return ["resume", session];
+  if (agent === "claude") return ["--resume", session];
+  return ["--session", session];
 }
 
-function paneList() {
-  return JSON.parse(runHerdr(["pane", "list"])).result.panes;
+function agentSession(agent, value) {
+  return agent === "pi"
+    ? { source: "herdr:pi", agent, kind: "path", value }
+    : { source: `herdr:${agent}`, agent, kind: "id", value };
 }
 
-function paneById(paneId) {
-  return paneList().find(pane => pane.pane_id === paneId);
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function paneProcess(paneId) {
-  return JSON.parse(runHerdr(["pane", "process-info", "--pane", paneId])).result.process_info;
+const started = Date.now();
+const { root, home } = makeHome("restore");
+const env = cleanEnv(home);
+const sessionName = "durable-restore-e2e";
+const folder = join(root, "project");
+const runsDir = join(root, "runs");
+const fakeBin = join(root, "bin");
+const codexSessions = join(home, ".codex", "sessions", "project");
+const claudeSessions = join(home, ".claude", "projects", "project");
+const piSessions = join(home, ".pi", "agent", "sessions", "project");
+
+for (const directory of [folder, runsDir, fakeBin, codexSessions, claudeSessions, piSessions]) {
+  mkdirSync(directory, { recursive: true });
+}
+writeConfig(home, "onboarding = false\n\n[session]\nresume_agents_on_restore = false\n");
+env.PATH = `${fakeBin}:${env.PATH}`;
+
+for (const agent of SUPPORTED_AGENTS) {
+  const file = join(fakeBin, agent);
+  writeFileSync(file, `#!/bin/sh
+id=""
+for arg in "$@"; do
+  case "$arg" in --durable-id=*) id="\${arg#--durable-id=}" ;; esac
+done
+[ -n "$id" ] || id="unknown-$$"
+{
+  printf 'cwd=%s\\n' "$PWD"
+  printf 'arg=%s\\n' "$@"
+} > ${JSON.stringify(runsDir)}/"$id".log
+sleep 60
+`, { mode: 0o755 });
 }
 
-function savedRecord(paneId) {
-  try {
-    return JSON.parse(readFileSync(join(stateRoot, `${encodeURIComponent(paneId)}.json`), "utf8"));
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-    return null;
+function seedSession(agent, id, seed) {
+  if (!seed) return `missing-${id}`;
+  if (agent === "codex") {
+    writeFileSync(join(codexSessions, `rollout-${id}.jsonl`), "");
+    return id;
   }
-}
-
-function waitFor(predicate, description, timeout = 20_000) {
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
-    const value = predicate();
-    if (value) return value;
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 100);
-  }
-  throw new Error(`timeout waiting for ${description}`);
-}
-
-async function startHerdr() {
-  await terminal.submit(`herdr --session ${herdrSession}`);
-  waitFor(() => {
-    try {
-      paneList();
-      return true;
-    } catch {
-      return false;
-    }
-  }, "Herdr API ready");
-}
-
-try {
-  await terminal.open({ cwd: process.cwd(), env, waitReady: true });
-  await startHerdr();
-
-  const sourcePane = paneList()[0];
-  const split = JSON.parse(runHerdr([
-    "pane", "split", sourcePane.pane_id, "--direction", "right",
-    "--cwd", agentCwd,
-    "--env", `HOME=${agentHome}`,
-    "--no-focus",
-  ]));
-  const paneId = split.result.pane.pane_id;
   if (agent === "claude") {
-    const trustPane = JSON.parse(runHerdr([
-      "pane", "split", paneId, "--direction", "down", "--cwd", agentCwd,
-      "--env", `HOME=${agentHome}`, "--no-focus",
-    ])).result.pane.pane_id;
-    runHerdr(["pane", "run", trustPane, "claude"]);
-    try {
-      runHerdr(["pane", "wait-output", trustPane, "--match", "Security guide", "--timeout", "5000"]);
-      runHerdr(["pane", "send-keys", trustPane, "down"]);
-      runHerdr(["pane", "send-keys", trustPane, "enter"]);
-    } catch {}
-    runHerdr(["pane", "close", trustPane]);
+    writeFileSync(join(claudeSessions, `${id}.jsonl`), "");
+    return id;
   }
-  runHerdr(["agent", "start", agentName, "--kind", agent, "--pane", paneId]);
-  runHerdr(["agent", "prompt", agentName, "Reply with ok only", "--wait"]);
+  const file = join(piSessions, `${id}.jsonl`);
+  writeFileSync(file, "");
+  return file;
+}
 
-  waitFor(() => paneById(paneId)?.agent_session, `${agent} pane session`);
-  waitFor(() => savedRecord(paneId)?.argv?.length > 0, `${agent} capture`);
+const tabs = [];
+const specs = [];
+let paneNumber = 0;
 
-  const record = savedRecord(paneId);
-  const capturedPane = paneById(paneId);
-  if (capturedPane.agent_session.value !== record.session) throw new Error("captured session mismatch");
+function makeSpec(agent, { seed = true } = {}) {
+  paneNumber += 1;
+  const label = `pane${paneNumber}`;
+  const id = `${agent}-session-${paneNumber}`;
+  const session = seedSession(agent, id, seed);
+  const flags = FLAGS[agent];
+  return {
+    agent,
+    label,
+    session,
+    seed,
+    argv: [`/${agent}`, ...flags, `--durable-id=${label}`],
+    expected: [...flags, `--durable-id=${label}`, ...resumeArguments(agent, session)],
+    agentSession: agentSession(agent, session),
+  };
+}
 
-  runHerdr(["session", "stop", herdrSession]);
-  waitFor(() => {
-    try {
-      paneList();
-      return false;
-    } catch {
-      return true;
-    }
-  }, "Herdr session stop");
-  await startHerdr();
+function addTab(name, tabSpecs) {
+  tabs.push({
+    name,
+    panes: tabSpecs.map(spec => ({ label: spec.label, agentSession: spec.agentSession })),
+  });
+  specs.push(...tabSpecs);
+}
 
-  waitFor(() => paneProcess(paneId)?.foreground_processes?.some(process => process.name === agent), `${agent} restored process`);
-  const restoredPane = paneById(paneId);
-  if (restoredPane.agent_session.value !== record.session) throw new Error("restored session mismatch");
+for (const agent of agents) {
+  addTab(agent, [makeSpec(agent)]);
+}
+
+const splitAgents = agents.length >= 2
+  ? agents.slice(0, 2)
+  : [agents[0], agents[0]];
+addTab("split", splitAgents.map(agent => makeSpec(agent)));
+
+const skipped = makeSpec("codex", { seed: false });
+addTab("missing-session", [skipped]);
+
+const validSpecs = specs.filter(spec => spec.seed);
+const neededPanes = specs.length;
+
+function recordFile(paneId) {
+  return join(pluginStateDir(home), `${encodeURIComponent(paneId)}.json`);
+}
+
+function readRecord(paneId) {
+  try {
+    return JSON.parse(readFileSync(recordFile(paneId), "utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+function clearRuns() {
+  rmSync(runsDir, { recursive: true, force: true });
+  mkdirSync(runsDir, { recursive: true });
+}
+
+function readRun(label) {
+  const file = join(runsDir, `${label}.log`);
+  if (!existsSync(file)) return null;
+  const lines = readFileSync(file, "utf8").trim().split("\n");
+  return {
+    cwd: lines[0].replace(/^cwd=/, ""),
+    args: lines.slice(1).map(line => line.replace(/^arg=/, "")),
+  };
+}
+
+function waitForRuns() {
+  waitFor(
+    () => validSpecs.every(spec => existsSync(join(runsDir, `${spec.label}.log`))),
+    `restore runs for ${validSpecs.map(spec => spec.label).join(", ")}`,
+  );
+}
+
+function assertRuns() {
+  for (const spec of validSpecs) {
+    const run = readRun(spec.label);
+    assert.ok(run, `missing run for ${spec.label}`);
+    assert.equal(run.cwd, folder, `${spec.label} restored in the wrong folder`);
+    assert.deepEqual(run.args, spec.expected, `${spec.label} restored with the wrong argv`);
+  }
+  assert.equal(readRun(skipped.label), null, "pane with a missing session should not be restored");
+}
+
+function waitForCapture() {
+  waitFor(
+    () => validSpecs.every(spec => {
+      const record = readRecord(spec.paneId);
+      return record?.argv?.includes(join(fakeBin, spec.agent));
+    }),
+    "pane state to be captured again after restore",
+  );
+}
+
+let server;
+try {
+  writeSnapshot(home, sessionName, buildSnapshot({ cwd: folder, tabs }));
+
+  linkPlugin(env, { disabled: true });
+  server = startServer({ session: sessionName, env });
+  const panes = server.run(["pane", "list"]).result.panes;
+  await server.stop();
+
+  const paneByLabel = new Map(panes.map(pane => [pane.label, pane]));
+  assert.equal(panes.length, neededPanes, "snapshot did not restore every pane");
+  for (const spec of specs) {
+    const pane = paneByLabel.get(spec.label);
+    assert.ok(pane, `missing restored pane ${spec.label}`);
+    spec.paneId = pane.pane_id;
+  }
+
+  mkdirSync(pluginStateDir(home), { recursive: true });
+  for (const spec of specs) {
+    writeFileSync(recordFile(spec.paneId), `${JSON.stringify({
+      agent: spec.agent,
+      session: spec.session,
+      argv: spec.argv,
+    }, null, 2)}\n`);
+  }
+
+  linkPlugin(env);
+  clearRuns();
+  server = startServer({ session: sessionName, env });
+  waitForRuns();
+  sleep(300);
+  assertRuns();
+  waitForCapture();
+  assert.equal(
+    readRecord(skipped.paneId).session,
+    skipped.session,
+    "skipped pane state should be left untouched",
+  );
+  await server.stop();
+
+  clearRuns();
+  server = startServer({ session: sessionName, env });
+  waitForRuns();
+  sleep(300);
+  assertRuns();
+  assert.equal(
+    readRecord(skipped.paneId).session,
+    skipped.session,
+    "skipped pane state should survive a second restart",
+  );
+  await server.stop();
 
   console.log(JSON.stringify({
-    agent,
-    pane_id: paneId,
-    session: record.session,
-    argv: record.argv,
+    agents,
+    panes: specs.length,
+    restored: validSpecs.length,
+    skipped: specs.length - validSpecs.length,
+    ms: Date.now() - started,
   }));
 } catch (error) {
-  console.error(await terminal.text({ full: true }));
+  if (server) console.error(server.output());
   throw error;
 } finally {
-  await terminal.closeQuiet();
   try {
-    runHerdr(["session", "stop", herdrSession]);
+    await server?.stop();
   } catch {}
-  if (!process.env.HERDR_DURABLE_DEBUG) rmSync(home, { recursive: true, force: true });
+  if (!process.env.HERDR_DURABLE_DEBUG) {
+    rmSync(root, { recursive: true, force: true });
+  }
 }

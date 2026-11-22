@@ -44,10 +44,13 @@ State is stored only in Herdr's plugin state directory.
 
 ```sh
 npm test
+npm run test:e2e
 npm run test:e2e -- codex
-npm run test:e2e -- claude
-npm run test:e2e -- pi
 ```
+
+`npm test` covers command construction, session validation, capture, and multi-pane restore logic. `npm run test:e2e` starts a headless Herdr server, seeds a session snapshot, and restores fake Codex, Claude, and Pi panes. It needs no model access.
+
+For a release check against the real agents, run `npm run test:e2e:real` after signing in to each agent and trusting the repository directory.
 
 ## License
 

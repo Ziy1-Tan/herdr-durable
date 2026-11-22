@@ -1,6 +1,6 @@
 {
   "name": "herdr-durable",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Keep Claude, Codex, and Pi launch arguments across Herdr restarts",
   "license": "MIT",
   "type": "module",

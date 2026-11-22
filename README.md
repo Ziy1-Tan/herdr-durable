@@ -2,7 +2,7 @@
 
 Keep Claude Code, Codex, and Pi running in your [Herdr](https://herdr.dev) panes across server restarts.
 
-The built-in herdr restore drops permission and sandbox bypass flags such as `-dangerously-bypass-approvals-and-sandbox` and `--dangerously-skip-permissions`. herdr-durable remembers the original launch arguments and sends the right resume command back to the same pane.
+The built-in herdr restore drops permission and sandbox bypass flags such as `--dangerously-bypass-approvals-and-sandbox` and `--dangerously-skip-permissions`. herdr-durable remembers the original launch arguments and sends the right resume command back to the same pane.
 
 | Running in the pane | After a restart |
 | --- | --- |
@@ -23,7 +23,7 @@ resume_agents_on_restore = false
 ## Install
 
 ```sh
-herdr plugin install ziy1-tan/herdr-durable
+herdr plugin install Ziy1-Tan/herdr-durable
 ```
 
 Update:

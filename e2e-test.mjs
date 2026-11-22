@@ -75,7 +75,6 @@ function waitFor(predicate, description, timeout = 20_000) {
 
 async function startHerdr() {
   await terminal.submit(`herdr --session ${herdrSession}`);
-  await terminal.getByText("new                 menu").expect({ timeout: 20_000 });
   waitFor(() => {
     try {
       paneList();

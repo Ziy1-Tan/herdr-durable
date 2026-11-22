@@ -14,9 +14,8 @@
     "node": ">=18"
   },
   "scripts": {
-    "test": "node --test test.js && ./test-restore.sh",
+    "test": "node --test test.js",
     "test:core": "node --test test.js",
-    "test:restore": "./test-restore.sh",
     "test:e2e": "node e2e-test.mjs",
     "test:e2e:all": "node e2e-test.mjs codex && node e2e-test.mjs claude && node e2e-test.mjs pi",
     "prepublishOnly": "npm test"

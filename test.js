@@ -7,6 +7,7 @@ const { spawn } = require('node:child_process');
 const { once } = require('node:events');
 
 const {
+  restorePanes,
   readRecord,
   launchArgv,
   normalizeAgent,
@@ -60,6 +61,50 @@ test('validates sessions', () => {
 test('reads argv from proc', () => {
   assert.equal(readProcArgv(999999999), null);
   assert.equal(readProcArgv(process.pid)[0], process.execPath);
+});
+
+test('restores multiple panes and sends each command once', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'herdr-durable-'));
+  const executable = path.join(directory, 'herdr');
+  const panes = [
+    { pane_id: 'w1:p1', agent: 'codex', agent_session: { agent: 'codex', value: 'sess' } },
+    { pane_id: 'w1:p2', agent: 'claude', agent_session: { agent: 'claude', value: 'csess' } },
+    { pane_id: 'w1:p3', agent: 'pi', agent_session: { agent: 'pi', value: '/sessions/psess' } },
+  ];
+  const records = [
+    ['w1:p1', { agent: 'codex', session: 'sess', argv: ['/codex', '--yolo'] }],
+    ['w1:p2', { agent: 'claude', session: 'csess', argv: ['/claude', '--model', 'x'] }],
+    ['w1:p3', { agent: 'pi', session: '/sessions/psess', argv: ['/pi', '--profile', 'x'] }],
+  ];
+  fs.writeFileSync(executable, `#!/bin/sh
+case "$1 $2" in
+  'pane list') printf '%s\\n' '${JSON.stringify({ id: 'x', result: { panes } })}' ;;
+  'pane process-info') printf '%s\\n' '{"id":"x","result":{"process_info":{"foreground_processes":[{"pid":123,"name":"zsh"}]}}}' ;;
+  'pane run') printf '%s\\n' "$*" >> ${JSON.stringify(path.join(directory, 'runs'))}; printf '%s\\n' '{"id":"x","result":{"ok":true}}' ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+`);
+  fs.chmodSync(executable, 0o755);
+  fs.mkdirSync(path.join(directory, 'panes'), { recursive: true });
+  for (const [paneId, record] of records) {
+    fs.writeFileSync(path.join(directory, 'panes', `${encodeURIComponent(paneId)}.json`), JSON.stringify(record));
+  }
+
+  process.env.HERDR_BIN_PATH = executable;
+  process.env.HERDR_PLUGIN_STATE_DIR = directory;
+  const result = restorePanes();
+  assert.equal(result.restored, 3);
+  assert.equal(restorePanes().restored, 0);
+  const commands = fs.readFileSync(path.join(directory, 'runs'), 'utf8').trim().split('\n');
+  assert.equal(commands.length, 3);
+  assert.deepEqual(commands, [
+    'pane run w1:p1 codex --yolo resume sess',
+    'pane run w1:p2 claude --model x --resume csess',
+    'pane run w1:p3 pi --profile x --session /sessions/psess',
+  ]);
+  fs.rmSync(directory, { recursive: true, force: true });
+  delete process.env.HERDR_BIN_PATH;
+  delete process.env.HERDR_PLUGIN_STATE_DIR;
 });
 
 test('treats missing or invalid pane state as empty', () => {

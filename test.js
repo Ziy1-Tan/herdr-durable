@@ -10,6 +10,7 @@ import {
   launchInfo,
   parseEvent,
   parseLaunchArgs,
+  readProcArgv,
   resumeArgv,
   resumeArgvProblem,
   syncAll,
@@ -132,6 +133,15 @@ test('rejects processes that are not interactive sessions', () => {
   }
   // A first positional is a prompt for codex, so it stays interactive.
   assert.deepEqual(launchFlags('codex', ['codex', '--yolo', 'explain this']), ['--yolo']);
+});
+
+test('reads the original argv from /proc when Herdr omits it', () => {
+  // Herdr strips argv from processes it detects as agents on Linux.
+  if (process.platform !== 'linux') return;
+  const argv = readProcArgv(process.pid);
+  assert.equal(argv[0], process.execPath);
+  assert.match(argv.at(-1), /test\.js$/);
+  assert.equal(readProcArgv(-1), null);
 });
 
 test('finds the agent process through wrappers and .exe names', () => {

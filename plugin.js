@@ -145,9 +145,25 @@ function agentArgIndex(argv, agent) {
   return -1;
 }
 
+// Herdr redacts argv for agent processes it detects on Linux, so fall back to the OS.
+function processArgv(process) {
+  return Array.isArray(process?.argv) ? process.argv : readProcArgv(process?.pid);
+}
+
+function readProcArgv(pid) {
+  if (!Number.isInteger(pid) || !fs.existsSync(`/proc/${pid}/cmdline`)) return null;
+  try {
+    const raw = fs.readFileSync(`/proc/${pid}/cmdline`);
+    const argv = raw.toString('utf8').split('\0').filter(Boolean);
+    return argv.length > 0 ? argv : null;
+  } catch {
+    return null;
+  }
+}
+
 function agentProcess(info, agent) {
   const processes = Array.isArray(info?.foreground_processes) ? info.foreground_processes : [];
-  const matches = processes.filter(process => agentArgIndex(process.argv, agent) >= 0);
+  const matches = processes.filter(process => agentArgIndex(processArgv(process), agent) >= 0);
   return matches.find(process => process.pid === info.foreground_process_group_id) || matches[0] || null;
 }
 
@@ -249,7 +265,7 @@ function syncPane(paneId) {
   const info = herdr(['pane', 'process-info', '--pane', paneId])?.process_info;
   const process = agentProcess(info, agent);
   if (!process) return { pane_id: paneId, agent, skipped: 'no_process', retry: true };
-  const launch = launchInfo(agent, process.argv);
+  const launch = launchInfo(agent, processArgv(process));
   if (!launch) return { pane_id: paneId, agent, skipped: 'not_interactive' };
   // Herdr's session is current after /clear or a resume picker; the launch argv covers the
   // time before the agent's first report.
@@ -354,6 +370,7 @@ export {
   agentProcess,
   launchFlags,
   launchInfo,
+  readProcArgv,
   parseEvent,
   parseLaunchArgs,
   resumeArgv,

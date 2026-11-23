@@ -5,470 +5,321 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { nativeResumeDisabled } from './configure.js';
+import { nativeResumeEnabled } from './configure.js';
 
-const API_TIMEOUT_MS = 20_000;
-const API_COMMAND_TIMEOUT_MS = 10_000;
-const API_SLEEP_INTERVAL_MS = 100;
-const CAPTURE_RETRY_MS = 30_000;
-const CAPTURE_ALL_RETRY_MS = 5_000;
-const CAPTURE_POLL_INTERVAL_MS = 500;
-const RESUME_ARGUMENTS = {
-  codex: 'resume',
-  claude: '--resume',
-  pi: '--session',
-};
-const INTERPRETERS = new Set(['sh', 'bash', 'zsh', 'dash', 'node', 'bun', 'deno', 'python', 'python3', 'env']);
-const SUPPORTED_AGENTS = new Set(Object.keys(RESUME_ARGUMENTS));
-const SESSION_DIRECTORIES = {
-  claude: path.join(os.homedir(), '.claude', 'projects'),
-  codex: path.join(os.homedir(), '.codex', 'sessions'),
-  pi: path.join(os.homedir(), '.pi', 'agent', 'sessions'),
-};
-const SESSION_DIRECTORY_ENV = {
-  claude: 'HERDR_DURABLE_CLAUDE_SESSIONS',
-  codex: 'HERDR_DURABLE_CODEX_SESSIONS',
-  pi: 'HERDR_DURABLE_PI_SESSIONS',
+const SOURCE = 'plugin:herdr-durable';
+const HERDR_TIMEOUT_MS = 5_000;
+const DETECT_WAIT_MS = 20_000;
+const POLL_MS = 500;
+const MAX_RESUME_ARGS = 64;
+const MAX_RESUME_BYTES = 8192;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const INTERPRETERS = new Set(['node', 'bun', 'deno', 'sh', 'bash', 'zsh', 'dash', 'env', 'python', 'python3']);
+
+const AGENTS = {
+  claude: {
+    value: [
+      '--agent', '--agents', '--append-system-prompt', '--append-system-prompt-file', '--autocompact',
+      '--debug-file', '--effort', '--environment', '--fallback-model', '--input-format', '--json-schema',
+      '--max-budget-usd', '--model', '-n', '--name', '--output-format', '--permission-mode',
+      '--permission-prompts', '--plugin-dir', '--plugin-url', '--remote-control-session-name-prefix',
+      '--session-id', '--setting-sources', '--settings', '--system-prompt', '--system-prompt-file',
+      '--system-prompt-snapshot',
+    ],
+    optional: [
+      '-d', '--debug', '-r', '--resume', '--cloud', '--from-pr', '--remote-control', '--teleport',
+      '-w', '--worktree', '--prompt-suggestions',
+    ],
+    variadic: [
+      '--add-dir', '--allowedTools', '--allowed-tools', '--betas', '--disallowedTools',
+      '--disallowed-tools', '--file', '--mcp-config', '--tools',
+    ],
+    drop: [
+      '-c', '--continue', '-r', '--resume', '--session-id', '--fork-session', '--from-pr', '--teleport',
+      '--cloud', '--environment', '-w', '--worktree', '--tmux', '--file',
+    ],
+    blockers: ['-p', '--print', '--bg', '--background', '--desktop', '-h', '--help', '-v', '--version'],
+    resume: (flags, id) => ['claude', ...flags, '--resume', id],
+    restart: (flags, id) => ['claude', ...flags, '--session-id', id],
+    launchSession: args => optionValue(args, ['--resume', '-r', '--session-id']),
+    sessionExists: claudeSessionExists,
+  },
+  codex: {
+    value: [
+      '-c', '--config', '--enable', '--disable', '--remote', '--remote-auth-token-env', '-m', '--model',
+      '--local-provider', '-p', '--profile', '-s', '--sandbox', '-C', '--cd', '--add-dir',
+      '-a', '--ask-for-approval',
+    ],
+    optional: [],
+    variadic: ['-i', '--image'],
+    drop: ['-i', '--image', '--worktree', '--last', '--all', '--include-non-interactive'],
+    blockers: ['-h', '--help', '-V', '--version'],
+    interactive: first => first === undefined || first === 'resume' || first === 'fork' || !CODEX_SUBCOMMANDS.has(first),
+    resume: (flags, id) => ['codex', ...flags, 'resume', id],
+    restart: flags => ['codex', ...flags],
+    launchSession: (args, positionals) => (positionals[0] === 'resume' && UUID.test(positionals[1] || '') ? positionals[1] : null),
+    sessionExists: codexSessionExists,
+  },
 };
 
-function herdr() {
-  return process.env.HERDR_BIN_PATH || 'herdr';
+const CODEX_SUBCOMMANDS = new Set([
+  'agents', 'exec', 'e', 'review', 'login', 'logout', 'mcp', 'plugin', 'app-server', 'remote-control', 'app',
+  'completion', 'update', 'doctor', 'sandbox', 'debug', 'apply', 'a', 'queue', 'archive', 'delete',
+  'migrate-rollouts', 'migrate-nfs-db', 'unarchive', 'cloud', 'exec-server', 'features', 'help',
+]);
+
+for (const spec of Object.values(AGENTS)) {
+  spec.arity = new Map([
+    ...spec.value.map(option => [option, 'value']),
+    ...spec.optional.map(option => [option, 'optional']),
+    ...spec.variadic.map(option => [option, 'variadic']),
+  ]);
+  spec.drop = new Set(spec.drop);
+  spec.blockers = new Set(spec.blockers);
 }
 
-function runHerdr(args, options = {}) {
-  return spawnSync(herdr(), args, {
-    encoding: 'utf8',
-    maxBuffer: 32 * 1024 * 1024,
-    timeout: API_COMMAND_TIMEOUT_MS,
-    ...options,
-  });
+function isOption(token) {
+  return token.length > 1 && token.startsWith('-');
 }
 
-function herdrJson(args) {
-  const deadline = Date.now() + API_TIMEOUT_MS;
-  let result;
-  for (;;) {
-    result = runHerdr(args);
-    if (result.status === 0 && result.stdout.trim()) break;
-    if (Date.now() >= deadline) {
-      throw new Error(`${herdr()} ${args.join(' ')} failed: ${result.stderr || result.stdout || 'empty response'}`);
+function parseLaunchArgs(agent, args) {
+  const spec = AGENTS[agent];
+  const flags = [];
+  const positionals = [];
+  let blocked = false;
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === '--') {
+      positionals.push(...args.slice(index + 1));
+      break;
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, API_SLEEP_INTERVAL_MS);
-  }
-  const response = JSON.parse(result.stdout);
-  if (!response?.result) throw new Error(`${herdr()} ${args.join(' ')} failed: no result`);
-  return response;
-}
-
-function runPaneCommand(paneId, command) {
-  const result = runHerdr(['pane', 'run', paneId, command], { timeout: 30_000 });
-  if (result.status !== 0) throw new Error(result.stderr || result.stdout || 'pane run failed');
-  return true;
-}
-
-function stateRoot() {
-  const root = process.env.HERDR_PLUGIN_STATE_DIR;
-  if (!root) throw new Error('HERDR_PLUGIN_STATE_DIR is not set; run through Herdr');
-  return path.join(root, 'panes');
-}
-
-function stateFile(paneId) {
-  return path.join(stateRoot(), `${encodeURIComponent(paneId)}.json`);
-}
-
-function readRecord(paneId) {
-  try {
-    const raw = fs.readFileSync(stateFile(paneId), 'utf8');
-    const value = raw.trim() ? JSON.parse(raw) : null;
-    if (value && typeof value === 'object' && !Array.isArray(value)) return value;
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      console.error(`herdr-durable: ignoring state for ${paneId}: ${error.message}`);
+    if (!isOption(token)) {
+      positionals.push(token);
+      continue;
     }
+    const equals = token.startsWith('--') ? token.indexOf('=') : -1;
+    const name = equals > 0 ? token.slice(0, equals) : token;
+    const option = [token];
+    if (equals < 0) {
+      const arity = spec.arity.get(name);
+      const next = args[index + 1];
+      if (arity === 'value' && next !== undefined) {
+        option.push(args[++index]);
+      } else if (arity === 'optional' && next !== undefined && !isOption(next)) {
+        option.push(args[++index]);
+      } else if (arity === 'variadic') {
+        while (index + 1 < args.length && !isOption(args[index + 1])) option.push(args[++index]);
+      }
+    }
+    if (spec.blockers.has(name)) blocked = true;
+    if (!spec.drop.has(name)) flags.push(...option);
   }
-  return null;
+  return { flags, positionals, blocked };
 }
 
-function writeRecord(paneId, record) {
-  const file = stateFile(paneId);
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  const temp = `${file}.${process.pid}.tmp`;
-  fs.writeFileSync(temp, `${JSON.stringify(record, null, 2)}\n`, { mode: 0o600 });
-  fs.renameSync(temp, file);
+function commandName(value) {
+  return path.basename(String(value || '')).toLowerCase().replace(/\.(exe|cmd|bat|js|mjs|cjs)$/, '');
 }
 
-function parseEvent(raw) {
-  if (!raw) return null;
-  const event = JSON.parse(raw);
-  const name = event?.event?.replaceAll('.', '_');
-  const data = event?.data;
-  if ((name !== 'pane_agent_detected' && name !== 'pane_agent_status_changed')
-      || typeof data?.pane_id !== 'string') return null;
-  return { name, paneId: data.pane_id, agent: data.agent };
-}
-
-function normalizeAgent(value) {
-  const agent = typeof value === 'string' ? value.toLowerCase() : '';
-  return SUPPORTED_AGENTS.has(agent) ? agent : null;
-}
-
-function shellQuote(value) {
-  if (value === '') return "''";
-  if (!/[^A-Za-z0-9_\-./:@%+=]/.test(value)) return value;
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function shellCommand(argv) {
-  return argv.map(shellQuote).join(' ');
-}
-
-function validSession(value) {
-  return typeof value === 'string' && value.length <= 1024 && !value.includes('\0');
-}
-
-function sessionUsable(agent, session) {
-  if (!validSession(session)) return false;
-  const directory = process.env[SESSION_DIRECTORY_ENV[agent]] || SESSION_DIRECTORIES[agent];
-  if (!directory) return false;
-  if (agent === 'pi') {
-    const root = path.resolve(directory);
-    const file = path.resolve(root, session.endsWith('.jsonl') ? session : `${session}.jsonl`);
-    return file.startsWith(`${root}${path.sep}`);
+function agentArgIndex(argv, agent) {
+  if (!Array.isArray(argv)) return -1;
+  for (let index = 0; index < argv.length && index < 4; index += 1) {
+    const name = commandName(argv[index]);
+    if (name === agent) return index;
+    const wrapperOption = index > 0 && argv[index].startsWith('-');
+    if (!INTERPRETERS.has(name) && !wrapperOption) return -1;
   }
-  try {
-    return fs.readdirSync(directory, { recursive: true }).some(file => (
-      agent === 'codex'
-        ? path.basename(file).endsWith(`-${session}.jsonl`)
-        : path.basename(file) === `${session}.jsonl`
-    ));
-  } catch {
-    return false;
-  }
+  return -1;
 }
 
-function launchArgv(agent, argv, session) {
-  const resumeCommand = RESUME_ARGUMENTS[agent];
-  let offset = 1;
-  while (offset < argv.length && INTERPRETERS.has(path.basename(argv[offset - 1]))) {
-    offset += 1;
-  }
-  const flags = argv.slice(offset).filter((argument, index, values) => {
-    if (argument === resumeCommand) return false;
-    return values[index - 1] !== resumeCommand;
-  });
-  return [agent, ...flags, resumeCommand, session];
-}
-
-function readPane(paneId) {
-  const response = herdrJson(['pane', 'get', paneId]);
-  const pane = response?.result?.pane;
-  if (!pane) throw new Error(`pane get returned no pane: ${JSON.stringify(response)}`);
-  return pane;
-}
-
-function processInfo(paneId) {
-  const response = herdrJson(['pane', 'process-info', '--pane', paneId]);
-  const info = response?.result?.process_info;
-  if (!info) throw new Error(`process-info returned no process_info: ${JSON.stringify(response)}`);
-  return info;
-}
-
-function firstAgentProcess(info, agent) {
-  return (info.foreground_processes || []).find(
-    process => process.name === agent && typeof process.pid === 'number',
-  );
+function processArgv(process) {
+  return Array.isArray(process?.argv) ? process.argv : readProcArgv(process?.pid);
 }
 
 function readProcArgv(pid) {
+  if (!Number.isInteger(pid) || !fs.existsSync(`/proc/${pid}/cmdline`)) return null;
   try {
     const raw = fs.readFileSync(`/proc/${pid}/cmdline`);
-    const argv = raw.toString('utf8').split('\0').filter(value => value !== '');
+    const argv = raw.toString('utf8').split('\0').filter(Boolean);
     return argv.length > 0 ? argv : null;
   } catch {
     return null;
   }
 }
 
-function capturePane(paneId, agentOverride) {
-  const pane = readPane(paneId);
-  const agent = normalizeAgent(agentOverride || pane.agent || pane.agent_session?.agent);
-  if (!agent) return { captured: false, reason: 'unsupported_agent' };
-  if (!pane.agent_session) return { captured: false, reason: 'no_agent_session', retry: true };
-  if (pane.agent_session.agent !== agent) return { captured: false, reason: 'agent_mismatch' };
+function agentProcess(info, agent) {
+  const processes = Array.isArray(info?.foreground_processes) ? info.foreground_processes : [];
+  const matches = processes.filter(process => agentArgIndex(processArgv(process), agent) >= 0);
+  return matches.find(process => process.pid === info.foreground_process_group_id) || matches[0] || null;
+}
 
-  const session = pane.agent_session.value;
-  if (!validSession(session)) return { captured: false, reason: 'invalid_session' };
-  if (!sessionUsable(agent, session)) return { captured: false, reason: 'missing_session', retry: true };
+function launchInfo(agent, argv) {
+  const start = agentArgIndex(argv, agent);
+  if (start < 0) return null;
+  const args = argv.slice(start + 1);
+  const { flags, positionals, blocked } = parseLaunchArgs(agent, args);
+  if (blocked) return null;
+  const interactive = AGENTS[agent].interactive;
+  if (interactive && !interactive(positionals[0])) return null;
+  return { flags, session: AGENTS[agent].launchSession(args, positionals) };
+}
 
-  const info = processInfo(paneId);
-  const process = firstAgentProcess(info, agent);
-  const argv = process
-    ? (readProcArgv(process.pid) || (Array.isArray(process.argv) ? process.argv : null))
-    : null;
-  if (!argv || argv.length === 0) return { captured: false, reason: 'no_process' };
+function launchFlags(agent, argv) {
+  return launchInfo(agent, argv)?.flags ?? null;
+}
 
-  writeRecord(paneId, {
-    agent,
-    session,
-    argv,
+function optionValue(args, names) {
+  let value = null;
+  args.forEach((arg, index) => {
+    for (const name of names) {
+      if (arg === name && index + 1 < args.length && !isOption(args[index + 1])) value = args[index + 1];
+      else if (arg.startsWith(name + '=')) value = arg.slice(name.length + 1);
+    }
   });
-  return { captured: true };
+  return value;
+}
+
+function resumeArgvProblem(argv) {
+  if (argv.length > MAX_RESUME_ARGS) return 'more than ' + MAX_RESUME_ARGS + ' arguments';
+  if (argv.reduce((total, arg) => total + Buffer.byteLength(arg), 0) > MAX_RESUME_BYTES) return 'longer than 8 KiB';
+  if (argv.some(arg => arg.includes("'"))) return 'an argument contains an apostrophe';
+  if (argv.some(arg => /\p{Cc}/u.test(arg))) return 'an argument contains a control character';
+  return null;
+}
+
+function resumeArgv(agent, flags, sessionId) {
+  const spec = AGENTS[agent];
+  return spec.sessionExists(sessionId) === false ? spec.restart(flags, sessionId) : spec.resume(flags, sessionId);
+}
+
+function claudeSessionExists(id) {
+  const root = path.join(process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude'), 'projects');
+  let projects;
+  try {
+    projects = fs.readdirSync(root);
+  } catch {
+    return null;
+  }
+  return projects.some(project => fs.existsSync(path.join(root, project, id + '.jsonl')));
+}
+
+function codexSessionExists(id) {
+  const root = path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'sessions');
+  let files;
+  try {
+    files = fs.readdirSync(root, { recursive: true });
+  } catch {
+    return null;
+  }
+  return files.some(file => String(file).endsWith('-' + id + '.jsonl'));
+}
+
+function herdr(args) {
+  const result = spawnSync(process.env.HERDR_BIN_PATH || 'herdr', args, {
+    encoding: 'utf8',
+    timeout: HERDR_TIMEOUT_MS,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  let response = null;
+  try {
+    response = JSON.parse(result.stdout);
+  } catch {}
+  if (result.status !== 0 || response?.error) {
+    const detail = response?.error?.message || result.stderr || result.stdout || result.error?.message || 'failed';
+    throw new Error('herdr ' + args.slice(0, 2).join(' ') + ': ' + String(detail).trim());
+  }
+  return response?.result ?? null;
+}
+
+function reportSeq() {
+  return String(BigInt(Date.now()) * 1_000_000n + process.hrtime.bigint() % 1_000_000n);
+}
+
+function syncPane(paneId) {
+  const pane = herdr(['pane', 'get', paneId])?.pane;
+  const agent = pane?.agent;
+  if (!Object.hasOwn(AGENTS, agent)) return { pane_id: paneId, skipped: 'unsupported_agent' };
+  const info = herdr(['pane', 'process-info', '--pane', paneId])?.process_info;
+  const process = agentProcess(info, agent);
+  if (!process) return { pane_id: paneId, agent, skipped: 'no_process', retry: true };
+  const launch = launchInfo(agent, processArgv(process));
+  if (!launch) return { pane_id: paneId, agent, skipped: 'not_interactive' };
+  const reported = pane.agent_session;
+  const session = reported?.source === 'herdr:' + agent && reported.agent === agent && reported.kind === 'id' && reported.value
+    ? reported.value
+    : launch.session;
+  if (!session) return { pane_id: paneId, agent, skipped: 'no_session', retry: true };
+  const argv = resumeArgv(agent, launch.flags, session);
+  const problem = resumeArgvProblem(argv);
+  if (problem) return { pane_id: paneId, agent, skipped: 'invalid_argv', error: problem };
+  herdr(['pane', 'report-agent-session', paneId, '--source', SOURCE, '--agent', agent, '--seq', reportSeq(), '--', ...argv]);
+  return { pane_id: paneId, agent, reported: argv };
 }
 
 function sleep(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function captureWithRetry(paneId, agentOverride, waitMs = CAPTURE_RETRY_MS) {
+function syncPaneUntilSettled(paneId, waitMs) {
   const deadline = Date.now() + waitMs;
   for (;;) {
     let outcome;
     try {
-      outcome = capturePane(paneId, agentOverride);
+      outcome = syncPane(paneId);
     } catch (error) {
-      outcome = { captured: false, reason: 'error', error: error.message, retry: true };
+      outcome = { pane_id: paneId, error: error.message, retry: true };
     }
-    if (outcome.captured || !outcome.retry || Date.now() >= deadline) return outcome;
-    sleep(CAPTURE_POLL_INTERVAL_MS);
+    if (!outcome.retry || Date.now() >= deadline) {
+      delete outcome.retry;
+      return outcome;
+    }
+    sleep(POLL_MS);
   }
 }
 
-function captureFromEvent(rawEvent) {
-  const event = parseEvent(rawEvent);
-  if (!event) return { captured: false, reason: 'ignored_event' };
-  const outcome = captureWithRetry(event.paneId, event.agent);
-  return {
-    captured: outcome.captured,
-    reason: outcome.reason,
-    error: outcome.error,
-    pane_id: event.paneId,
-    agent: event.agent || null,
-  };
-}
-
-function pruneRecords(paneIds) {
-  const root = stateRoot();
-  let files;
+function parseEvent(raw) {
+  let event;
   try {
-    files = fs.readdirSync(root);
-  } catch (error) {
-    if (error.code !== 'ENOENT') {
-      console.error(`herdr-durable: cannot prune records: ${error.message}`);
-    }
-    return 0;
+    event = JSON.parse(raw || '');
+  } catch {
+    return null;
   }
-  let pruned = 0;
-  for (const file of files) {
-    if (!file.endsWith('.json')) continue;
-    let paneId;
-    try {
-      paneId = decodeURIComponent(file.slice(0, -5));
-    } catch {
-      continue;
-    }
-    if (paneIds.has(paneId) || !readRecord(paneId)) continue;
-    fs.rmSync(stateFile(paneId), { force: true });
-    pruned += 1;
-  }
-  return pruned;
+  const name = String(event?.event || '').replaceAll('.', '_');
+  const data = event?.data;
+  const paneId = data?.pane_id;
+  if (typeof paneId !== 'string') return null;
+  if (name !== 'pane_agent_detected' && name !== 'pane_agent_status_changed') return null;
+  if (data.released || (data.agent != null && !Object.hasOwn(AGENTS, data.agent))) return null;
+  return { paneId, detected: name === 'pane_agent_detected' };
 }
 
-function captureAll() {
-  const response = herdrJson(['pane', 'list']);
-  const panes = response?.result?.panes || [];
-  const paneIds = new Set(panes.map(pane => pane.pane_id));
-  const actions = [];
-  let captured = 0;
-
-  for (const pane of panes) {
-    const action = { pane_id: pane.pane_id };
-    if (!pane.agent_session) {
-      action.skipped = 'no_agent';
-      actions.push(action);
-      continue;
-    }
-    const outcome = captureWithRetry(pane.pane_id, null, CAPTURE_ALL_RETRY_MS);
-    if (outcome.captured) {
-      captured += 1;
-      action.captured = true;
-    } else {
-      action.skipped = outcome.reason;
-      if (outcome.error) action.error = outcome.error;
-    }
-    actions.push(action);
-  }
-
-  const pruned = pruneRecords(paneIds);
-  return { captured, actions, pruned };
-}
-
-function shouldRestore(record, pane) {
-  if (!record || !record.argv || !record.session) return false;
-  const session = pane.agent_session;
-  if (!session) return false;
-  return session.agent === record.agent && session.value === record.session;
-}
-
-function restorePanes({ dryRun = false } = {}) {
-  const response = herdrJson(['pane', 'list']);
-  const panes = response?.result?.panes || [];
-  const actions = [];
-  let restored = 0;
-
-  for (const pane of panes) {
-    const record = readRecord(pane.pane_id);
-    if (!record) continue;
-    const action = { pane_id: pane.pane_id, agent: record.agent, session: record.session };
-    if (!shouldRestore(record, pane)) {
-      action.skipped = 'stale_record';
-      action.pane_agent = pane.agent_session?.agent || null;
-      action.pane_session = pane.agent_session?.value || null;
-      actions.push(action);
-      continue;
-    }
-    if (!sessionUsable(record.agent, record.session)) {
-      action.skipped = 'missing_session';
-      actions.push(action);
-      continue;
-    }
-    try {
-      const info = processInfo(pane.pane_id);
-      if (firstAgentProcess(info, record.agent)) {
-        action.skipped = 'agent_running';
-        actions.push(action);
-        continue;
-      }
-      const command = shellCommand(launchArgv(record.agent, record.argv, record.session));
-      action.command = command;
-      if (dryRun) {
-        actions.push(action);
-        continue;
-      }
-      runPaneCommand(pane.pane_id, command);
-      restored += 1;
-      actions.push(action);
-    } catch (error) {
-      action.error = error.message;
-      actions.push(action);
-    }
-  }
-
-  return { restored, actions };
-}
-
-function status() {
-  const root = stateRoot();
-  fs.mkdirSync(root, { recursive: true });
-  const response = herdrJson(['pane', 'list']);
-  const panes = response?.result?.panes || [];
-  const paneById = new Map(panes.map(pane => [pane.pane_id, pane]));
-  const records = fs.readdirSync(root)
-    .filter(file => file.endsWith('.json'))
-    .map(file => {
-      let paneId;
+function syncAll() {
+  const panes = herdr(['pane', 'list'])?.panes || [];
+  return panes
+    .filter(pane => Object.hasOwn(AGENTS, pane.agent))
+    .map(pane => {
       try {
-        paneId = decodeURIComponent(file.slice(0, -5));
-      } catch {
-        return null;
+        const outcome = syncPane(pane.pane_id);
+        delete outcome.retry;
+        return outcome;
+      } catch (error) {
+        return { pane_id: pane.pane_id, error: error.message };
       }
-      const record = readRecord(paneId);
-      if (!record) return null;
-      const pane = paneById.get(paneId);
-      return {
-        pane_id: paneId,
-        label: pane?.label || null,
-        saved_agent: record.agent,
-        saved_session: record.session,
-        pane_agent: pane?.agent_session?.agent || null,
-        pane_session: pane?.agent_session?.value || null,
-        matches_pane: pane ? shouldRestore(record, pane) : false,
-        session_exists: sessionUsable(record.agent, record.session),
-        orphaned: !pane,
-      };
-    })
-    .filter(Boolean)
-    .sort((left, right) => left.pane_id.localeCompare(right.pane_id));
-  return { saved: records.length, records };
+    });
 }
 
-function notify(title, body) {
-  try {
-    runHerdr(['notification', 'show', title, '--body', body]);
-  } catch {}
-}
-
-function nativeResumeGuard() {
-  if (process.env.HERDR_DURABLE_TEST === '1') return true;
-  if (nativeResumeDisabled()) return true;
-  const message = 'session.resume_agents_on_restore must be false; see README Prerequisites';
-  notify('Herdr Durable disabled', message);
-  console.error(`herdr-durable: ${message}`);
-  return false;
-}
-
-function restoreSummary(result, { dryRun = false } = {}) {
-  const skipped = result.actions.filter(action => action.skipped || action.error).length;
-  const count = dryRun
-    ? result.actions.filter(action => action.command).length
-    : result.restored;
-  const verb = dryRun ? 'ready' : 'restored';
-  return `${count} ${verb}${skipped ? `, ${skipped} skipped` : ''}`;
-}
-
-function statusSummary(result) {
-  const missing = result.records.filter(record => !record.session_exists).length;
-  const orphaned = result.records.filter(record => record.orphaned).length;
-  return [
-    `${result.saved} saved`,
-    missing ? `${missing} missing session` : null,
-    orphaned ? `${orphaned} orphaned` : null,
-  ].filter(Boolean).join(', ');
-}
-
-function main() {
-  const mode = process.argv[2];
-  if (!nativeResumeGuard()) {
-    process.exitCode = 1;
-    return;
+function main(mode) {
+  if (!nativeResumeEnabled()) {
+    console.error('herdr-durable: session.resume_agents_on_restore is false, so Herdr will not run resume commands');
+    return null;
   }
-  if (!mode) {
-    console.log(JSON.stringify(restorePanes()));
-    return;
+  if (mode === 'event') {
+    const event = parseEvent(process.env.HERDR_PLUGIN_EVENT_JSON);
+    if (!event) return null;
+    return syncPaneUntilSettled(event.paneId, event.detected ? DETECT_WAIT_MS : 0);
   }
-  if (mode === 'capture') {
-    const result = captureFromEvent(process.env.HERDR_PLUGIN_EVENT_JSON);
-    console.log(JSON.stringify(result));
-    return;
-  }
-  if (mode === 'capture-all') {
-    const result = captureAll();
-    console.log(JSON.stringify(result));
-    const summary = [`Saved ${result.captured} session${result.captured === 1 ? '' : 's'}`];
-    if (result.pruned) {
-      summary.push(`pruned ${result.pruned} closed pane${result.pruned === 1 ? '' : 's'}`);
-    }
-    notify('Herdr Durable', `${summary.join(', ')}.`);
-    return;
-  }
-  if (mode === 'restore') {
-    const result = restorePanes();
-    console.log(JSON.stringify(result));
-    notify('Herdr Durable', restoreSummary(result));
-    return;
-  }
-  if (mode === 'dry-run') {
-    const result = restorePanes({ dryRun: true });
-    console.log(JSON.stringify(result));
-    notify('Herdr Durable preview', restoreSummary(result, { dryRun: true }));
-    return;
-  }
-  if (mode === 'status') {
-    const result = status();
-    console.log(JSON.stringify(result));
-    notify('Herdr Durable', statusSummary(result));
-    return;
-  }
-  throw new Error(`unknown mode: ${mode}`);
+  if (mode === 'sync') return syncAll();
+  throw new Error('usage: node plugin.js event|sync');
 }
 
 let invokedAsScript = false;
@@ -479,28 +330,25 @@ try {
 
 if (invokedAsScript) {
   try {
-    main();
+    const result = main(process.argv[2]);
+    if (result) console.log(JSON.stringify(result));
   } catch (error) {
-    console.error(`herdr-durable: ${error.message}`);
+    console.error('herdr-durable: ' + error.message);
     process.exitCode = 1;
   }
 }
 
 export {
-  SUPPORTED_AGENTS,
-  captureAll,
-  captureFromEvent,
-  captureWithRetry,
-  launchArgv,
-  normalizeAgent,
-  parseEvent,
-  readRecord,
-  restorePanes,
-  shellCommand,
+  SOURCE,
+  agentProcess,
+  launchFlags,
+  launchInfo,
   readProcArgv,
-  shellQuote,
-  shouldRestore,
-  sessionUsable,
-  status,
-  validSession,
+  parseEvent,
+  parseLaunchArgs,
+  resumeArgv,
+  resumeArgvProblem,
+  syncAll,
+  syncPane,
+  syncPaneUntilSettled,
 };

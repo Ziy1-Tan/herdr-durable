@@ -3,4 +3,6 @@ repos:
     rev: v0.19.1
     hooks:
       - id: gitlint
+        # --msg-filename takes the commit-msg path pre-commit appends last.
+        args: [--staged, --contrib, contrib-body-requires-signed-off-by, --msg-filename]
         stages: [commit-msg]

@@ -1,49 +1,27 @@
 id = "herdr-durable"
 name = "Herdr Durable"
-version = "1.0.0"
+version = "2.0.0"
 min_herdr_version = "0.9.5"
-description = "Resume Claude, Codex, and Pi with their original launch arguments"
+description = "Resume Claude Code and Codex with their original launch flags"
 platforms = ["linux", "macos"]
 
 [[build]]
 command = ["node", "configure.js", "check"]
 
 [[startup]]
-command = ["node", "plugin.js"]
+command = ["node", "plugin.js", "sync"]
 
 [[events]]
 on = "pane.agent_detected"
-command = ["node", "plugin.js", "capture"]
+command = ["node", "plugin.js", "event"]
 
 [[events]]
 on = "pane.agent_status_changed"
-command = ["node", "plugin.js", "capture"]
+command = ["node", "plugin.js", "event"]
 
 [[actions]]
-id = "restore"
-title = "Herdr Durable: restore saved sessions"
-description = "Re-run resume commands for saved agents"
+id = "sync"
+title = "Herdr Durable: report resume commands now"
+description = "Report resume commands for every running Claude Code and Codex pane"
 contexts = ["global"]
-command = ["node", "plugin.js", "restore"]
-
-[[actions]]
-id = "restore-dry-run"
-title = "Herdr Durable: preview restore"
-description = "Show resume commands without running them"
-contexts = ["global"]
-command = ["node", "plugin.js", "dry-run"]
-
-[[actions]]
-id = "save"
-title = "Herdr Durable: save current sessions"
-description = "Capture the agents running in Herdr right now"
-contexts = ["global"]
-command = ["node", "plugin.js", "capture-all"]
-
-[[actions]]
-id = "status"
-title = "Herdr Durable: show saved sessions"
-description = "Show saved agents and whether their session files still exist"
-contexts = ["global"]
-command = ["node", "plugin.js", "status"]
-
+command = ["node", "plugin.js", "sync"]

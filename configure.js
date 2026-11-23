@@ -9,12 +9,12 @@ function configPath() {
   return process.env.HERDR_CONFIG_PATH || path.join(os.homedir(), '.config', 'herdr', 'config.toml');
 }
 
-function nativeResumeDisabled() {
+function nativeResumeEnabled() {
   let content;
   try {
     content = fs.readFileSync(configPath(), 'utf8');
   } catch (error) {
-    if (error.code === 'ENOENT') return false;
+    if (error.code === 'ENOENT') return true;
     throw error;
   }
 
@@ -24,23 +24,20 @@ function nativeResumeDisabled() {
     if (!line || line.startsWith('#')) continue;
     const header = line.match(/^\[([^\]]+)\]$/);
     if (header) {
-      section = header[1];
+      section = header[1].trim();
       continue;
     }
     const setting = line.match(/^(session\.)?resume_agents_on_restore\s*=\s*(true|false)$/);
     if (!setting) continue;
-    if (section === 'session' || setting[1]) return setting[2] === 'false';
+    if (section === 'session' || (section === '' && setting[1])) return setting[2] === 'true';
   }
-  return false;
+  return true;
 }
 
 function main() {
-  const mode = process.argv[2];
-  if (mode !== 'check') {
-    throw new Error('Usage: node configure.js check');
-  }
-  if (!nativeResumeDisabled()) {
-    throw new Error('session.resume_agents_on_restore must be false before installing; see README Prerequisites');
+  if (process.argv[2] !== 'check') throw new Error('Usage: node configure.js check');
+  if (!nativeResumeEnabled()) {
+    throw new Error('session.resume_agents_on_restore is false; remove it or set it to true (see README)');
   }
 }
 
@@ -59,4 +56,4 @@ if (invokedAsScript) {
   }
 }
 
-export { nativeResumeDisabled };
+export { nativeResumeEnabled };

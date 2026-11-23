@@ -1,6 +1,4 @@
 #!/usr/bin/env node
-// Reports Claude Code and Codex resume commands that keep the original launch flags.
-// Herdr saves the command with the pane and runs it after a server restart.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -18,11 +16,6 @@ const MAX_RESUME_BYTES = 8192;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const INTERPRETERS = new Set(['node', 'bun', 'deno', 'sh', 'bash', 'zsh', 'dash', 'env', 'python', 'python3']);
 
-// Every launch option is kept unless listed in drop. drop holds only options that select a
-// different session or do one-time work on start (new worktree, attachments, cloud sessions).
-// value/optional/variadic say how an option consumes the tokens after it, so values are never
-// mistaken for positionals. Positionals (prompts, session ids, subcommands) are always removed.
-// A blocker means the process is not an interactive session that can be resumed.
 const AGENTS = {
   claude: {
     value: [
@@ -47,7 +40,6 @@ const AGENTS = {
     ],
     blockers: ['-p', '--print', '--bg', '--background', '--desktop', '-h', '--help', '-v', '--version'],
     resume: (flags, id) => ['claude', ...flags, '--resume', id],
-    // Herdr keeps the pane's Claude session id across a fresh start, so reuse that id.
     restart: (flags, id) => ['claude', ...flags, '--session-id', id],
     launchSession: args => optionValue(args, ['--resume', '-r', '--session-id']),
     sessionExists: claudeSessionExists,
@@ -62,12 +54,9 @@ const AGENTS = {
     variadic: ['-i', '--image'],
     drop: ['-i', '--image', '--worktree', '--last', '--all', '--include-non-interactive'],
     blockers: ['-h', '--help', '-V', '--version'],
-    // Without a subcommand the first positional is a prompt; resume and fork open sessions too.
     interactive: first => first === undefined || first === 'resume' || first === 'fork' || !CODEX_SUBCOMMANDS.has(first),
     resume: (flags, id) => ['codex', ...flags, 'resume', id],
-    // Codex reports its new session on startup, and Herdr accepts the replacement.
     restart: flags => ['codex', ...flags],
-    // "codex resume <id>" names its session; codex only reports it to Herdr on the first turn.
     launchSession: (args, positionals) => (positionals[0] === 'resume' && UUID.test(positionals[1] || '') ? positionals[1] : null),
     sessionExists: codexSessionExists,
   },
@@ -93,7 +82,6 @@ function isOption(token) {
   return token.length > 1 && token.startsWith('-');
 }
 
-// Splits launch arguments the way the agent CLI parses them.
 function parseLaunchArgs(agent, args) {
   const spec = AGENTS[agent];
   const flags = [];
@@ -133,7 +121,6 @@ function commandName(value) {
   return path.basename(String(value || '')).toLowerCase().replace(/\.(exe|cmd|bat|js|mjs|cjs)$/, '');
 }
 
-// Index of the agent executable in argv, allowing wrappers such as "node /path/claude".
 function agentArgIndex(argv, agent) {
   if (!Array.isArray(argv)) return -1;
   for (let index = 0; index < argv.length && index < 4; index += 1) {
@@ -145,7 +132,6 @@ function agentArgIndex(argv, agent) {
   return -1;
 }
 
-// Herdr redacts argv for agent processes it detects on Linux, so fall back to the OS.
 function processArgv(process) {
   return Array.isArray(process?.argv) ? process.argv : readProcArgv(process?.pid);
 }
@@ -167,8 +153,6 @@ function agentProcess(info, agent) {
   return matches.find(process => process.pid === info.foreground_process_group_id) || matches[0] || null;
 }
 
-// Launch flags worth keeping and the session the process was started on, or null when the
-// process is not an interactive session.
 function launchInfo(agent, argv) {
   const start = agentArgIndex(argv, agent);
   if (start < 0) return null;
@@ -184,7 +168,6 @@ function launchFlags(agent, argv) {
   return launchInfo(agent, argv)?.flags ?? null;
 }
 
-// Value of the last --name/--name=value occurrence among args.
 function optionValue(args, names) {
   let value = null;
   args.forEach((arg, index) => {
@@ -196,7 +179,6 @@ function optionValue(args, names) {
   return value;
 }
 
-// Mirrors Herdr's resume_argv checks so a bad command is skipped instead of rejected.
 function resumeArgvProblem(argv) {
   if (argv.length > MAX_RESUME_ARGS) return 'more than ' + MAX_RESUME_ARGS + ' arguments';
   if (argv.reduce((total, arg) => total + Buffer.byteLength(arg), 0) > MAX_RESUME_BYTES) return 'longer than 8 KiB';
@@ -205,8 +187,6 @@ function resumeArgvProblem(argv) {
   return null;
 }
 
-// A new session has no file until its first prompt and cannot be resumed yet,
-// so until then the agent starts a new session with the same flags.
 function resumeArgv(agent, flags, sessionId) {
   const spec = AGENTS[agent];
   return spec.sessionExists(sessionId) === false ? spec.restart(flags, sessionId) : spec.resume(flags, sessionId);
@@ -251,13 +231,10 @@ function herdr(args) {
   return response?.result ?? null;
 }
 
-// Herdr ignores reports whose seq is not above the last one from this source,
-// across processes and restarts, so use wall-clock nanoseconds like Herdr's own hooks.
 function reportSeq() {
   return String(BigInt(Date.now()) * 1_000_000n + process.hrtime.bigint() % 1_000_000n);
 }
 
-// One attempt for one pane. retry marks states that settle on their own shortly.
 function syncPane(paneId) {
   const pane = herdr(['pane', 'get', paneId])?.pane;
   const agent = pane?.agent;
@@ -267,8 +244,6 @@ function syncPane(paneId) {
   if (!process) return { pane_id: paneId, agent, skipped: 'no_process', retry: true };
   const launch = launchInfo(agent, processArgv(process));
   if (!launch) return { pane_id: paneId, agent, skipped: 'not_interactive' };
-  // Herdr's session is current after /clear or a resume picker; the launch argv covers the
-  // time before the agent's first report.
   const reported = pane.agent_session;
   const session = reported?.source === 'herdr:' + agent && reported.agent === agent && reported.kind === 'id' && reported.value
     ? reported.value
@@ -314,7 +289,6 @@ function parseEvent(raw) {
   const paneId = data?.pane_id;
   if (typeof paneId !== 'string') return null;
   if (name !== 'pane_agent_detected' && name !== 'pane_agent_status_changed') return null;
-  // Skip other agents and releases without starting any herdr calls.
   if (data.released || (data.agent != null && !Object.hasOwn(AGENTS, data.agent))) return null;
   return { paneId, detected: name === 'pane_agent_detected' };
 }
@@ -342,7 +316,6 @@ function main(mode) {
   if (mode === 'event') {
     const event = parseEvent(process.env.HERDR_PLUGIN_EVENT_JSON);
     if (!event) return null;
-    // The session id arrives shortly after detection; status changes need one look.
     return syncPaneUntilSettled(event.paneId, event.detected ? DETECT_WAIT_MS : 0);
   }
   if (mode === 'sync') return syncAll();

@@ -9,7 +9,6 @@ function configPath() {
   return process.env.HERDR_CONFIG_PATH || path.join(os.homedir(), '.config', 'herdr', 'config.toml');
 }
 
-// Herdr runs reported resume commands only while native restore is on (the default).
 function nativeResumeEnabled() {
   let content;
   try {

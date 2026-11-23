@@ -22,7 +22,6 @@ function tempDir(prefix = 'herdr-durable-') {
   return fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 }
 
-// Stands in for the herdr binary and records every call it receives.
 function fakeHerdr(directory, responses) {
   const log = path.join(directory, 'calls.log');
   const script = path.join(directory, 'herdr');
@@ -83,7 +82,6 @@ test('keeps launch flags and drops the resumed session from positional arguments
     launchFlags('codex', ['codex', '--dangerously-bypass-approvals-and-sandbox', '-p', 'work', 'explain this']),
     ['--dangerously-bypass-approvals-and-sandbox', '-p', 'work'],
   );
-  // Unknown and identity options are kept; session selection and one-time work are dropped.
   assert.deepEqual(
     launchFlags('claude', ['claude', '--some-new-flag', '-n', 'worker-1', '--worktree', 'feat', '--tmux', '--file', 'f:a.txt']),
     ['--some-new-flag', '-n', 'worker-1'],
@@ -107,7 +105,6 @@ test('parses option values the way the CLIs do', () => {
     parseLaunchArgs('claude', ['--resume', '--verbose']),
     { flags: ['--verbose'], positionals: [], blocked: false },
   );
-  // --add-dir and --append-system-prompt consume their value, so it is not mistaken for a flag.
   assert.deepEqual(
     parseLaunchArgs('claude', ['--append-system-prompt', '--model sonnet', '--add-dir', 'a', 'b', '--verbose']),
     {
@@ -131,12 +128,10 @@ test('rejects processes that are not interactive sessions', () => {
   ]) {
     assert.equal(launchFlags(argv[0], argv), null, argv.join(' '));
   }
-  // A first positional is a prompt for codex, so it stays interactive.
   assert.deepEqual(launchFlags('codex', ['codex', '--yolo', 'explain this']), ['--yolo']);
 });
 
 test('reads the original argv from /proc when Herdr omits it', () => {
-  // Herdr strips argv from processes it detects as agents on Linux.
   if (process.platform !== 'linux') return;
   const argv = readProcArgv(process.pid);
   assert.equal(argv[0], process.execPath);
@@ -327,7 +322,6 @@ test('checks that Herdr will run reported resume commands', () => {
   assert.equal(nativeResumeEnabled(), false);
   fs.writeFileSync(process.env.HERDR_CONFIG_PATH, '[session]\nresume_agents_on_restore = true\n');
   assert.equal(nativeResumeEnabled(), true);
-  // Another section's key must not count.
   fs.writeFileSync(process.env.HERDR_CONFIG_PATH, '[ui]\nresume_agents_on_restore = false\n');
   assert.equal(nativeResumeEnabled(), true);
   fs.rmSync(home, { recursive: true, force: true });

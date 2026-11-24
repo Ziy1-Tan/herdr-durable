@@ -23,29 +23,13 @@ herdr plugin update herdr-durable
 herdr plugin uninstall herdr-durable
 ```
 
-Agents already running when you install are picked up at the next Herdr start, or right away with:
-
-```sh
-herdr plugin action invoke herdr-durable.sync
-```
-
 ## How it works
 
 1. When Herdr detects Claude Code or Codex in a pane, or its state changes, the plugin reads the pane's session id and the agent's launch argv from Herdr.
 2. It builds a resume command from the launch flags and reports it with `herdr pane report-agent-session ... -- <command>`.
 3. Herdr stores the command in its session snapshot and runs it when it restores the pane.
 
-## Troubleshooting
-
-See what the plugin reported:
-
-```sh
-herdr plugin log list --plugin herdr-durable
-```
-
-See the command Herdr will run for each pane: look for `agent_resume` in `~/.config/herdr/session.json`, or `~/.config/herdr/sessions/<name>/session.json` for a named session.
-
-## Development
+## Test
 
 ```sh
 npm test                                             # unit tests
@@ -56,3 +40,5 @@ node e2e.js real claude <session-id> codex <session-id>   # real agents, no prom
 ## License
 
 [MIT](LICENSE)
+
+Reference: https://herdr.dev/tui/docs/add-herdr-support/#report-the-resume-command

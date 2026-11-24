@@ -18,10 +18,3 @@ command = ["node", "plugin.js", "event"]
 [[events]]
 on = "pane.agent_status_changed"
 command = ["node", "plugin.js", "event"]
-
-[[actions]]
-id = "sync"
-title = "Herdr Durable: report resume commands now"
-description = "Report resume commands for every running Claude Code and Codex pane"
-contexts = ["global"]
-command = ["node", "plugin.js", "sync"]
